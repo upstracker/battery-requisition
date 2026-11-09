@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 import customtkinter as ctk
@@ -7,8 +8,10 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageTk
 
 import app_paths
-from database.db import init_db, generate_next_req_no
-from services import inventory_service as inv_service
+from database.db import init_db
+from services import autostart, netconfig, remote
+from services.backend import inv_service
+from services.errors import AuthError, ConflictError, ServerUnavailable
 from services import pdf_generator as pdf_gen
 from services import report_export as report_exporter
 from services.battery_search import (
@@ -43,8 +46,17 @@ class BatteryRequisitionApp(ctk.CTk):
         self.geometry("1260x780")
         self.minsize(1080, 680)
 
-        # เริ่มต้นฐานข้อมูล
-        init_db()
+        # โหมดการใช้งาน: เครื่องเดียว / เครื่องหลัก / เครื่องลูก (ยังไม่เคยตั้งค่า = เครื่องเดียวเหมือนเดิม)
+        self.net_cfg = netconfig.load()
+        net = netconfig.effective(self.net_cfg)
+        inv_service.configure(net)
+        self._conn_ok = True
+        self._server_start_failed = False
+        if net["mode"] == "standalone":
+            init_db()
+        elif net["mode"] == "server":
+            self._server_start_failed = not remote.ensure_server_running(net["port"])
+        self.editing_req_version = None
 
         self.editing_req_id = None # เก็บ ID ใบเบิกที่กำลังแก้ไขอยู่ (None = สร้างใหม่)
         self.cart_items = []
@@ -87,6 +99,14 @@ class BatteryRequisitionApp(ctk.CTk):
         self.frames["settings"] = self.create_settings_view()
 
         self.show_frame("req")
+        self.update_connection_badge()
+        self.after(10000, self._poll_connection)
+        if self._server_start_failed:
+            self.after(500, lambda: messagebox.showwarning(
+                "เซิร์ฟเวอร์ยังไม่พร้อม",
+                "เปิดเซิร์ฟเวอร์ของเครื่องหลักไม่สำเร็จ เครื่องอื่นจะยังใช้งานไม่ได้\nดูรายละเอียดในไฟล์ server.log ในโฟลเดอร์ข้อมูลของโปรแกรม"))
+        if self.net_cfg is None and not os.environ.get("BATTERY_REQ_SKIP_SETUP"):
+            self.after(600, self.prompt_first_run_mode)
 
         # ผูกปุ่มลัดคีย์บอร์ดสำหรับการคีย์ด่วน
         self.bind("<F2>", lambda e: self.focus_quick_search())
@@ -181,13 +201,13 @@ class BatteryRequisitionApp(ctk.CTk):
         )
         self.btn_nav_sett.grid(row=4, column=0, padx=14, pady=6, sticky="ew")
 
-        # ป้ายสถานะ SQLite
-        db_badge = ctk.CTkLabel(
-            self.sidebar, text="🟢 ฐานข้อมูล: SQLite (.db)", 
-            font=ctk.CTkFont(size=11, weight="bold"), 
+        # ป้ายสถานะการเชื่อมต่อฐานข้อมูล
+        self.lbl_conn_badge = ctk.CTkLabel(
+            self.sidebar, text="", wraplength=170, justify="left",
+            font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#10b981"
         )
-        db_badge.grid(row=5, column=0, padx=18, pady=(12, 0), sticky="w")
+        self.lbl_conn_badge.grid(row=5, column=0, padx=18, pady=(12, 0), sticky="w")
 
         theme_label = ctk.CTkLabel(self.sidebar, text="ธีมการแสดงผล:", font=ctk.CTkFont(size=12))
         theme_label.grid(row=6, column=0, padx=18, pady=(10, 0), sticky="w")
@@ -197,6 +217,200 @@ class BatteryRequisitionApp(ctk.CTk):
             height=30
         )
         self.theme_menu.grid(row=7, column=0, padx=18, pady=(5, 20), sticky="ew")
+
+    # ==========================================
+    # โหมดการใช้งาน: เครื่องเดียว / เครื่องหลัก / เครื่องลูก (วงแลนด์)
+    # ==========================================
+    def report_callback_exception(self, exc, val, tb):
+        """แสดงข้อผิดพลาดที่ไม่คาดคิดให้ผู้ใช้เห็น (เดิมแอป .exe ไม่มีหน้าต่างคอนโซล จึงเงียบหมด)"""
+        import traceback
+        if isinstance(val, (ServerUnavailable, AuthError)):
+            self._conn_ok = False
+            messagebox.showerror("เชื่อมต่อเครื่องหลักไม่ได้", str(val))
+            return
+        try:
+            log_path = os.path.join(app_paths.user_data_dir(), "error.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{''.join(traceback.format_exception(exc, val, tb))}\n")
+        except OSError:
+            pass
+        messagebox.showerror("เกิดข้อผิดพลาด", f"{val}\n\n(บันทึกรายละเอียดไว้ที่ error.log ในโฟลเดอร์ข้อมูลของโปรแกรม)")
+
+    def update_connection_badge(self):
+        cfg = netconfig.effective(self.net_cfg)
+        if cfg["mode"] == "standalone":
+            text, color = "🟢 เครื่องเดียว (ฐานข้อมูลในเครื่อง)", "#10b981"
+        else:
+            where = "เครื่องหลัก (เครื่องนี้)" if cfg["mode"] == "server" else f"เครื่องหลัก {cfg['host']}"
+            if self._conn_ok:
+                text, color = f"🟢 เชื่อมต่อ{where}", "#10b981"
+            else:
+                text, color = f"🔴 ติดต่อ{where}ไม่ได้", "#dc2626"
+        self.lbl_conn_badge.configure(text=text, text_color=color)
+
+    def _poll_connection(self):
+        if inv_service.is_remote:
+            def worker():
+                self._conn_ok = inv_service.remote.ping()
+            threading.Thread(target=worker, daemon=True).start()
+            self.after(800, self.update_connection_badge)
+        self.after(10000, self._poll_connection)
+
+    def prompt_first_run_mode(self):
+        if netconfig.load() is None:
+            self.open_mode_dialog(first_run=True)
+
+    def open_mode_dialog(self, first_run=False):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("เลือกวิธีใช้งานโปรแกรม")
+        self._center_dialog(dlg, 560, 470)
+
+        ctk.CTkLabel(dlg, text="🌐 เลือกวิธีใช้งานโปรแกรม", font=ctk.CTkFont(size=18, weight="bold")).pack(padx=22, pady=(18, 2), anchor="w")
+        ctk.CTkLabel(
+            dlg, text="เปลี่ยนภายหลังได้ที่เมนู ⚙️ ตั้งค่า" if first_run else "ข้อมูลเดิมในเครื่องนี้ไม่ถูกลบเมื่อเปลี่ยนโหมด",
+            font=ctk.CTkFont(size=12), text_color="gray"
+        ).pack(padx=22, pady=(0, 10), anchor="w")
+
+        def choose(action):
+            dlg.destroy()
+            action()
+
+        options = [
+            ("🖥️ ใช้เครื่องเดียว", "ข้อมูลอยู่ในเครื่องนี้ เหมาะกับร้านที่มีคอมพิวเตอร์เครื่องเดียว", "#475569", lambda: self.apply_mode({"mode": "standalone"})),
+            ("🏠 เป็นเครื่องหลัก", "เก็บข้อมูลไว้ที่เครื่องนี้ แล้วให้เครื่องอื่นในวงแลนด์มาใช้ร่วมกัน (ควรเป็นเครื่องที่เปิดตลอดวัน)", "#0e7490", self.setup_server_mode),
+            ("💻 เป็นเครื่องลูก", "ใช้ข้อมูลร่วมกับเครื่องหลักที่ตั้งค่าไว้แล้ว ต้องมี IP หรือค้นหาอัตโนมัติ และรหัสเชื่อมต่อ", "#15803d", self.open_client_dialog),
+        ]
+        for title, desc, color, action in options:
+            card = ctk.CTkFrame(dlg, corner_radius=10)
+            card.pack(fill="x", padx=22, pady=6)
+            ctk.CTkButton(card, text=title, height=40, fg_color=color, font=ctk.CTkFont(size=15, weight="bold"),
+                          command=lambda a=action: choose(a)).pack(fill="x", padx=12, pady=(10, 4))
+            ctk.CTkLabel(card, text=desc, font=ctk.CTkFont(size=12), text_color="gray", wraplength=480, justify="left").pack(padx=14, pady=(0, 10), anchor="w")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        self.mode_dialog = dlg
+        return dlg
+
+    def setup_server_mode(self):
+        prev = netconfig.load() or {}
+        token = prev.get("token") if prev.get("mode") == "server" and prev.get("token") else netconfig.new_token()
+        cfg = {"mode": "server", "host": "127.0.0.1", "port": netconfig.DEFAULT_PORT, "token": token}
+        if not self.apply_mode(cfg):
+            return
+        ips = ", ".join(remote.local_ips()) or "(ดูที่ Windows: ipconfig)"
+        extra = "" if autostart.supported() else "\n\n(เซิร์ฟเวอร์จะเปิดเองทุกครั้งที่เปิดโปรแกรมนี้ ส่วนการเปิดอัตโนมัติตอนเปิดเครื่องใช้ได้บน Windows เท่านั้น)"
+        messagebox.showinfo(
+            "ตั้งเป็นเครื่องหลักแล้ว",
+            f"เครื่องนี้เป็นเครื่องหลักแล้ว\n\nIP ของเครื่องนี้: {ips}\nรหัสเชื่อมต่อ: {token}\n\n"
+            "ที่เครื่องอื่น: เลือก \"เป็นเครื่องลูก\" แล้วกดค้นหาอัตโนมัติ (หรือกรอก IP) และใส่รหัสเชื่อมต่อนี้\n"
+            "ถ้า Windows ถามเรื่องไฟร์วอลล์ ให้กดอนุญาต (Private network)" + extra
+        )
+        self.refresh_network_card()
+
+    def open_client_dialog(self):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("เชื่อมต่อเครื่องหลัก")
+        self._center_dialog(dlg, 520, 430)
+        prev = netconfig.load() or {}
+
+        ctk.CTkLabel(dlg, text="💻 เชื่อมต่อกับเครื่องหลัก", font=ctk.CTkFont(size=17, weight="bold")).pack(padx=22, pady=(18, 8), anchor="w")
+        form = ctk.CTkFrame(dlg, fg_color="transparent")
+        form.pack(fill="x", padx=22)
+        form.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="IP เครื่องหลัก:").grid(row=0, column=0, sticky="w", pady=6)
+        entry_host = ctk.CTkEntry(form, placeholder_text="เช่น 192.168.1.20")
+        entry_host.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=6)
+        if prev.get("mode") == "client":
+            entry_host.insert(0, prev.get("host", ""))
+
+        lbl_found = ctk.CTkLabel(form, text="", font=ctk.CTkFont(size=12), text_color="gray", anchor="w", justify="left", wraplength=440)
+        lbl_found.grid(row=2, column=0, columnspan=2, sticky="w")
+
+        def search():
+            lbl_found.configure(text="กำลังค้นหาเครื่องหลักในวงแลนด์...", text_color="gray")
+            dlg.update_idletasks()
+            found = remote.discover()
+            if not found:
+                lbl_found.configure(text="ไม่พบเครื่องหลักอัตโนมัติ (ตรวจว่าเครื่องหลักเปิดอยู่ หรือกรอก IP เอง)", text_color="#dc2626")
+                return
+            entry_host.delete(0, "end")
+            entry_host.insert(0, found[0]["host"])
+            names = ", ".join(f"{f['host']} ({f['name']})" if f["name"] else f["host"] for f in found)
+            lbl_found.configure(text=f"พบเครื่องหลัก: {names}", text_color="#15803d")
+
+        ctk.CTkButton(form, text="🔍 ค้นหาเครื่องหลักอัตโนมัติ", fg_color="#0e7490", hover_color="#155e75", command=search).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+
+        ctk.CTkLabel(form, text="รหัสเชื่อมต่อ:").grid(row=3, column=0, sticky="w", pady=(10, 6))
+        entry_token = ctk.CTkEntry(form, placeholder_text="รหัส 6 หลักที่แสดงที่เครื่องหลัก")
+        entry_token.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(10, 6))
+        if prev.get("mode") == "client":
+            entry_token.insert(0, prev.get("token", ""))
+
+        lbl_result = ctk.CTkLabel(dlg, text="", font=ctk.CTkFont(size=12, weight="bold"), wraplength=470, justify="left", anchor="w")
+        lbl_result.pack(fill="x", padx=22, pady=(10, 0))
+
+        def connect():
+            host, token = entry_host.get().strip(), entry_token.get().strip()
+            if not host or not token:
+                lbl_result.configure(text="กรุณากรอก IP เครื่องหลักและรหัสเชื่อมต่อ", text_color="#dc2626")
+                return
+            lbl_result.configure(text="กำลังทดสอบการเชื่อมต่อ...", text_color="gray")
+            dlg.update_idletasks()
+            problem = remote.RemoteClient(host, netconfig.DEFAULT_PORT, token).check()
+            if problem:
+                lbl_result.configure(text=f"❌ {problem}", text_color="#dc2626")
+                return
+            dlg.destroy()
+            self.apply_mode({"mode": "client", "host": host, "port": netconfig.DEFAULT_PORT, "token": token})
+            messagebox.showinfo("เชื่อมต่อสำเร็จ", f"เชื่อมต่อเครื่องหลัก {host} เรียบร้อยแล้ว\nต่อไปนี้ใบเบิกและรุ่นแบตจะใช้ข้อมูลชุดเดียวกับเครื่องหลัก")
+
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(fill="x", padx=22, pady=(14, 16), side="bottom")
+        ctk.CTkButton(btns, text="ยกเลิก", fg_color="#64748b", hover_color="#475569", width=90, command=dlg.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btns, text="✅ ทดสอบและเชื่อมต่อ", fg_color="#15803d", hover_color="#166534", width=170,
+                      font=ctk.CTkFont(weight="bold"), command=connect).pack(side="right")
+        dlg.bind("<Return>", lambda e: connect())
+        self.client_dialog = dlg
+        dlg.form_widgets = {"host": entry_host, "token": entry_token, "connect": connect, "result": lbl_result, "search": search}
+        return dlg
+
+    def apply_mode(self, cfg):
+        """บันทึกและใช้โหมดใหม่ทันที คืน True เมื่อสำเร็จ"""
+        prev = netconfig.effective(netconfig.load())
+        if prev["mode"] == "server" and cfg["mode"] != "server":
+            remote.stop_local_server(prev["port"], prev["token"])
+            autostart.disable()
+        if cfg["mode"] == "standalone":
+            init_db()
+        netconfig.save(cfg)
+        self.net_cfg = cfg
+        inv_service.configure(cfg)
+        if cfg["mode"] == "server":
+            if not remote.ensure_server_running(cfg["port"]):
+                messagebox.showerror("เปิดเซิร์ฟเวอร์ไม่สำเร็จ", "เปิดเซิร์ฟเวอร์ของเครื่องหลักไม่ได้ ดูรายละเอียดในไฟล์ server.log ในโฟลเดอร์ข้อมูลของโปรแกรม")
+                return False
+            autostart.enable()
+        self._conn_ok = True
+        self.cart_items = []
+        self.render_cart_items()
+        self.refresh_req_screen()
+        self.update_connection_badge()
+        self.refresh_network_card()
+        return True
+
+    def refresh_network_card(self):
+        if not hasattr(self, "lbl_net_mode"):
+            return
+        cfg = netconfig.effective(netconfig.load())
+        if cfg["mode"] == "standalone":
+            text = "ใช้เครื่องเดียว — ข้อมูลอยู่ในเครื่องนี้"
+        elif cfg["mode"] == "server":
+            ips = ", ".join(remote.local_ips()) or "-"
+            text = f"เครื่องหลัก — IP ของเครื่องนี้: {ips}  |  พอร์ต {cfg['port']}  |  รหัสเชื่อมต่อ: {cfg['token']}"
+        else:
+            text = f"เครื่องลูก — เชื่อมต่อเครื่องหลัก {cfg['host']}:{cfg['port']}"
+        self.lbl_net_mode.configure(text=text)
 
     def show_frame(self, name):
         buttons = {
@@ -504,7 +718,7 @@ class BatteryRequisitionApp(ctk.CTk):
     def refresh_req_screen(self):
         if not self.editing_req_id:
             self.entry_req_no.delete(0, "end")
-            self.entry_req_no.insert(0, generate_next_req_no())
+            self.entry_req_no.insert(0, inv_service.next_req_no())
 
         self.refresh_inventory_cache()
 
@@ -634,6 +848,10 @@ class BatteryRequisitionApp(ctk.CTk):
             self.show_quick_toast("⚠️ พิมพ์รุ่นที่ต้องการ หรือคลิกเลือกแถวในตารางก่อน", color="#d97706")
             self.entry_battery_search.focus()
             return "break"
+
+        if not self.current_matches and inv_service.is_remote:
+            self.refresh_inventory_cache()  # เครื่องอื่นอาจเพิ่มรุ่นนี้ไปแล้ว
+            self.matches_query = raw_text
 
         if not self.current_matches:
             qty_text = self.entry_qty.get().strip()
@@ -1492,6 +1710,7 @@ class BatteryRequisitionApp(ctk.CTk):
 
     def exit_edit_mode(self):
         self.editing_req_id = None
+        self.editing_req_version = None
         if hasattr(self, "edit_banner_frame"):
             self.edit_banner_frame.grid_forget()
         if hasattr(self, "btn_save_pdf"):
@@ -1555,7 +1774,8 @@ class BatteryRequisitionApp(ctk.CTk):
                     ref_bill_no=ref_bill,
                     purpose=purpose,
                     req_items=self.cart_items,
-                    req_date=req_date
+                    req_date=req_date,
+                    expected_version=self.editing_req_version
                 )
                 success_msg = f"แก้ไขใบเบิก {final_req_no} เรียบร้อยแล้ว!"
             else:
@@ -1571,6 +1791,11 @@ class BatteryRequisitionApp(ctk.CTk):
                     req_date=req_date
                 )
                 success_msg = f"สร้างใบเบิกเลขที่ {final_req_no} เรียบร้อยแล้ว!"
+                if req_no and final_req_no != req_no:
+                    success_msg += f"\n(เลขที่ {req_no} ถูกเครื่องอื่นใช้ไปแล้ว จึงออกเป็น {final_req_no} ให้)"
+        except ConflictError as e:
+            messagebox.showwarning("ใบเบิกถูกแก้ไขโดยเครื่องอื่น", str(e))
+            return
         except Exception as e:
             messagebox.showerror("บันทึกไม่สำเร็จ", str(e))
             return
@@ -2184,6 +2409,7 @@ class BatteryRequisitionApp(ctk.CTk):
             return
 
         self.editing_req_id = req_id
+        self.editing_req_version = req.get("version")
 
         # สลับไปหน้าออกใบเบิก
         self.show_frame("req")
@@ -2387,6 +2613,19 @@ class BatteryRequisitionApp(ctk.CTk):
         )
         btn_open_db.pack(side="left", padx=10)
 
+        net_card = ctk.CTkFrame(view, corner_radius=10)
+        net_card.pack(fill="x", padx=20, pady=(0, 20))
+        net_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(net_card, text="🌐 การใช้งานหลายเครื่อง (วงแลนด์)", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(16, 6))
+        self.lbl_net_mode = ctk.CTkLabel(net_card, text="", wraplength=640, justify="left", anchor="w")
+        self.lbl_net_mode.grid(row=1, column=0, sticky="w", padx=20, pady=(0, 10))
+        ctk.CTkButton(
+            net_card, text="⚙️ เปลี่ยนโหมด / ตั้งค่าการเชื่อมต่อ",
+            fg_color="#0e7490", hover_color="#155e75", height=34,
+            command=lambda: self.open_mode_dialog()
+        ).grid(row=2, column=0, sticky="w", padx=20, pady=(0, 16))
+
         return view
 
     def do_backup_database(self):
@@ -2398,6 +2637,9 @@ class BatteryRequisitionApp(ctk.CTk):
             messagebox.showerror("เกิดข้อผิดพลาด", str(e))
 
     def open_db_folder(self):
+        if netconfig.effective(self.net_cfg)["mode"] == "client":
+            messagebox.showinfo("แจ้งเตือน", "ไฟล์ฐานข้อมูลอยู่ที่เครื่องหลัก เปิดดูได้เฉพาะที่เครื่องหลักเท่านั้น")
+            return
         db_info = inv_service.get_db_info()
         folder = os.path.dirname(db_info["db_path"])
         pdf_gen.open_pdf_file(folder)
@@ -2418,6 +2660,8 @@ class BatteryRequisitionApp(ctk.CTk):
 
         self.set_role3.delete(0, "end")
         self.set_role3.insert(0, settings.get("sign_role_3", ""))
+
+        self.refresh_network_card()
 
         # อัปเดตข้อมูล SQLite
         db_info = inv_service.get_db_info()

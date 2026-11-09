@@ -4,7 +4,7 @@
 ; =====================================================================
 
 #define MyAppName "ระบบออกใบเบิกจ่ายแบตเตอรี่ขึ้นรถส่งของ"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "คลังแบตเตอรี่และบริการ"
 #define MyAppExeName "BatteryRequisition.exe"
 #define MyAppAssocName "Battery Requisition Slip"
@@ -19,7 +19,7 @@ DefaultDirName={autopf}\BatteryRequisitionApp
 DefaultGroupName=ระบบออกใบเบิกแบตเตอรี่
 AllowNoIcons=yes
 OutputDir=dist_installer
-OutputBaseFilename=Setup_BatteryRequisition_v1.1.0
+OutputBaseFilename=Setup_BatteryRequisition_v1.2.0
 SetupIconFile=assets\car_battery.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 

@@ -46,18 +46,18 @@ jobs:
 
       - name: Package Portable Zip
         run: |
-          Compress-Archive -Path dist\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_v1.1.0.zip
+          Compress-Archive -Path dist\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_v1.2.0.zip
 
       - name: Upload Installer (.exe) Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Setup_BatteryRequisition_v1.1.0_Installer
-          path: dist_installer/Setup_BatteryRequisition_v1.1.0.exe
+          name: Setup_BatteryRequisition_v1.2.0_Installer
+          path: dist_installer/Setup_BatteryRequisition_v1.2.0.exe
           if-no-files-found: error
 
       - name: Upload Portable (.zip) Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BatteryRequisition_Portable_v1.1.0_Zip
-          path: dist_installer/BatteryRequisition_Portable_v1.1.0.zip
+          name: BatteryRequisition_Portable_v1.2.0_Zip
+          path: dist_installer/BatteryRequisition_Portable_v1.2.0.zip
           if-no-files-found: error

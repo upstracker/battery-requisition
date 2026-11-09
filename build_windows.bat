@@ -54,13 +54,13 @@ if %ISCC%=="none" (
     echo https://jrsoftware.org/isdl.php
 ) else (
     echo [+] พบ Inno Setup: %ISCC%
-    echo [*] กำลังสร้างไฟล์ติดตั้ง Setup_BatteryRequisition_v1.1.0.exe...
+    echo [*] กำลังสร้างไฟล์ติดตั้ง Setup_BatteryRequisition_v1.2.0.exe...
     %ISCC% installer.iss
     if %errorlevel% equ 0 (
         echo.
         echo =====================================================================
         echo   [SUCCESS] สร้างไฟล์ติดตั้งสำเร็จเรียบร้อยแล้ว!
-        echo   ไฟล์ติดตั้งอยู่ที่: dist_installer\Setup_BatteryRequisition_v1.1.0.exe
+        echo   ไฟล์ติดตั้งอยู่ที่: dist_installer\Setup_BatteryRequisition_v1.2.0.exe
         echo =====================================================================
     ) else (
         echo [ERROR] ไม่สามารถสร้างไฟล์ติดตั้งด้วย Inno Setup ได้

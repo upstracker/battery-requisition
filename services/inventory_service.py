@@ -3,15 +3,21 @@ import sqlite3
 from datetime import datetime
 
 import app_paths
-from database.db import get_connection, generate_next_req_no, get_db_file, record_issued_req_no
+from database.db import REQ_NO_PATTERN, get_connection, generate_next_req_no, get_db_file, record_issued_req_no
 from services.categories import BATTERY, item_category
 from services.dates import normalize_req_date, to_iso_date
+from services.errors import ConflictError
 
 # ยอดรวมต่อใบเบิก: แบตนับเป็นลูก ส่วนสินค้าอื่นนับเป็นจำนวนรายการ (หน่วยต่างกัน รวมกันไม่ได้)
 _TOTALS_SQL = f"""
     SUM(CASE WHEN ri.category = '{BATTERY}' THEN ri.quantity ELSE 0 END) AS battery_units,
     SUM(CASE WHEN ri.id IS NOT NULL AND ri.category != '{BATTERY}' THEN 1 ELSE 0 END) AS other_lines
 """
+
+
+def next_req_no():
+    """เลขที่ใบเบิกถัดไป (เครื่องลูกเรียกผ่านเครื่องหลัก)"""
+    return generate_next_req_no()
 
 
 def get_settings():
@@ -122,16 +128,25 @@ def create_requisition(driver_name, vehicle_plate, customer_name, route_zone, re
     final_date = normalize_req_date(req_date) if req_date else datetime.now().strftime("%d/%m/%Y")
     final_req_no = (custom_req_no or "").strip() or generate_next_req_no()
 
+    # เลขที่ที่ระบบออกให้ (รูปแบบ REQ-YYYYMM-NNNN) ถ้าชนกับของเครื่องอื่นที่เพิ่งบันทึก จะขยับเป็นเลขถัดไปให้เอง
+    auto_numbered = bool(REQ_NO_PATTERN.match(final_req_no))
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        try:
-            cursor.execute("""
-                INSERT INTO requisitions (req_no, req_date, driver_name, vehicle_plate, customer_name, route_zone, ref_bill_no, purpose, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
-            """, (final_req_no, final_date, driver_name.strip(), vehicle_plate.strip(), customer_name.strip(), route_zone.strip(), ref_bill_no.strip(), purpose.strip()))
-        except sqlite3.IntegrityError:
-            raise ValueError(f"เลขที่ใบเบิก {final_req_no} มีอยู่ในระบบแล้ว กรุณาใช้เลขอื่น") from None
+        for _ in range(8):
+            try:
+                cursor.execute("""
+                    INSERT INTO requisitions (req_no, req_date, driver_name, vehicle_plate, customer_name, route_zone, ref_bill_no, purpose, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
+                """, (final_req_no, final_date, driver_name.strip(), vehicle_plate.strip(), customer_name.strip(), route_zone.strip(), ref_bill_no.strip(), purpose.strip()))
+                break
+            except sqlite3.IntegrityError:
+                if not auto_numbered:
+                    raise ValueError(f"เลขที่ใบเบิก {final_req_no} มีอยู่ในระบบแล้ว กรุณาใช้เลขอื่น") from None
+                final_req_no = generate_next_req_no()
+        else:
+            raise ValueError("ออกเลขที่ใบเบิกไม่สำเร็จ กรุณาลองกดบันทึกอีกครั้ง")
         req_id = cursor.lastrowid
         _insert_requisition_items(cursor, req_id, req_items)
         record_issued_req_no(cursor, final_req_no)
@@ -268,7 +283,7 @@ def cancel_requisition(req_id):
         if row["status"] == "CANCELLED":
             raise ValueError("ใบเบิกนี้ถูกยกเลิกไปแล้ว")
 
-        cursor.execute("UPDATE requisitions SET status = 'CANCELLED' WHERE id = ?", (req_id,))
+        cursor.execute("UPDATE requisitions SET status = 'CANCELLED', version = version + 1 WHERE id = ?", (req_id,))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -315,18 +330,23 @@ def clear_cancelled_requisitions():
         conn.close()
 
 
-def update_requisition(req_id, driver_name, vehicle_plate, customer_name, route_zone, ref_bill_no, purpose, req_items, req_date=None):
-    """แก้ไขข้อมูลใบเบิกเดิม"""
+def update_requisition(req_id, driver_name, vehicle_plate, customer_name, route_zone, ref_bill_no, purpose, req_items, req_date=None, expected_version=None):
+    """แก้ไขข้อมูลใบเบิกเดิม ถ้าส่ง expected_version มา และใบถูกแก้โดยเครื่องอื่นไปแล้ว จะไม่เขียนทับ"""
     _validate_items(req_items)
     final_date = normalize_req_date(req_date) if req_date else None
 
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT req_no, status FROM requisitions WHERE id = ?", (req_id,))
+        cursor.execute("SELECT req_no, status, version FROM requisitions WHERE id = ?", (req_id,))
         curr = cursor.fetchone()
         if not curr:
-            raise ValueError("ไม่พบใบเบิกที่ต้องการแก้ไข")
+            raise ValueError("ไม่พบใบเบิกที่ต้องการแก้ไข (อาจถูกลบโดยเครื่องอื่นแล้ว)")
+        if expected_version is not None and curr["version"] != expected_version:
+            raise ConflictError(
+                f"ใบเบิก {curr['req_no']} ถูกแก้ไขหรือยกเลิกโดยเครื่องอื่นไปแล้ว ไม่เขียนทับให้\n"
+                "กรุณากด 'ยกเลิกการแก้ไข' แล้วเปิดใบนี้จากหน้าประวัติใหม่อีกครั้ง"
+            )
         if curr["status"] == "CANCELLED":
             raise ValueError("ใบเบิกนี้ถูกยกเลิกไปแล้ว ไม่สามารถแก้ไขได้")
 
@@ -337,7 +357,7 @@ def update_requisition(req_id, driver_name, vehicle_plate, customer_name, route_
 
         cursor.execute("""
             UPDATE requisitions
-            SET driver_name = ?, vehicle_plate = ?, customer_name = ?, route_zone = ?, ref_bill_no = ?, purpose = ?, req_date = COALESCE(?, req_date)
+            SET driver_name = ?, vehicle_plate = ?, customer_name = ?, route_zone = ?, ref_bill_no = ?, purpose = ?, req_date = COALESCE(?, req_date), version = version + 1
             WHERE id = ?
         """, (driver_name.strip(), vehicle_plate.strip(), customer_name.strip(), route_zone.strip(), ref_bill_no.strip(), purpose.strip(), final_date, req_id))
 

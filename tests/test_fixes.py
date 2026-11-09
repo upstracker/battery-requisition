@@ -175,10 +175,15 @@ class RequisitionServiceTests(TempHomeTestCase):
         self.assertEqual(self.inv.clear_cancelled_requisitions(), 1)
         self.assertEqual([r["id"] for r in self.inv.get_requisitions_advanced()], [keep_id])
 
-    def test_duplicate_requisition_number_gives_readable_error(self):
-        self._create(req_no="REQ-202611-0007")
+    def test_colliding_auto_number_moves_to_next_number(self):
+        _, first = self._create(req_no="REQ-202611-0007")
+        _, second = self._create(req_no="REQ-202611-0007")
+        self.assertEqual((first, second), ("REQ-202611-0007", "REQ-202611-0008"))
+
+    def test_duplicate_manual_number_gives_readable_error(self):
+        self._create(req_no="MANUAL-1")
         with self.assertRaisesRegex(ValueError, "มีอยู่ในระบบแล้ว"):
-            self._create(req_no="REQ-202611-0007")
+            self._create(req_no="MANUAL-1")
 
     def test_no_200_row_cap_for_totals(self):
         for _ in range(205):
@@ -231,7 +236,7 @@ class MigrationV2Tests(TempHomeTestCase):
 
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        self.assertEqual(cur.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(cur.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(cur.execute("SELECT brand, item_code FROM items WHERE id = 1").fetchone(), ("GS", "GS EVS-N55L (EFB)"))
         self.assertEqual(cur.execute("SELECT brand FROM items WHERE id = 2").fetchone()[0], "BOLIDEN")
         self.assertEqual([r[0] for r in cur.execute("SELECT category FROM requisition_items ORDER BY id")], [BATTERY, "อะไหล่"])

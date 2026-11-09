@@ -8,7 +8,7 @@ from services.categories import BATTERY, OTHER_CATEGORIES
 from services.dates import normalize_req_date
 
 # เวอร์ชันโครงสร้างฐานข้อมูลล่าสุด
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 def snapshot_backup(db_path, reason="pre_migration"):
@@ -167,10 +167,20 @@ def migration_v2(cursor):
     _normalize_stored_dates(cursor)
 
 
+def migration_v3(cursor):
+    """
+    Migration Version 3:
+    - เพิ่มเลขเวอร์ชันให้ใบเบิก เพื่อตรวจจับกรณีหลายเครื่องแก้ใบเดียวกันพร้อมกัน
+    """
+    if not _has_column(cursor, "requisitions", "version"):
+        cursor.execute("ALTER TABLE requisitions ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+
+
 # ทะเบียนบันทึกฟังก์ชัน Migration ตามเวอร์ชัน
 MIGRATIONS = {
     1: migration_v1,
     2: migration_v2,
+    3: migration_v3,
 }
 
 
