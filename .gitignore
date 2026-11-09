@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+build/
+dist/
+dist_installer/
+installer_output/
+_backup_before_fix_*/
+# ข้อมูลใช้งานจริง (ฐานข้อมูล, PDF, backup, รายงาน) ไม่เก็บใน git
+*.db
+*.db-shm
+*.db-wal
+data/
+database_backups/
+output_pdfs/
+exported_reports/
