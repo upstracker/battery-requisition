@@ -23,8 +23,6 @@ from services.categories import (
     count_breakdown,
     format_breakdown,
     format_totals,
-    is_battery,
-    item_category,
 )
 from services.catalog_rules import detect_brand
 from services.dates import normalize_req_date
@@ -52,7 +50,6 @@ class BatteryRequisitionApp(ctk.CTk):
         self.cart_items = []
         self.all_inventory_items = []
         self.cart_qty_entries = []
-        self.cart_rem_entries = []
         self.cart_name_entries = []
         self.current_matches = []
         self.current_scored_matches = []
@@ -234,66 +231,75 @@ class BatteryRequisitionApp(ctk.CTk):
     def create_requisition_view(self):
         view = ctk.CTkFrame(self.main_container, corner_radius=0, fg_color="transparent")
         view.grid_columnconfigure(0, weight=1)
-        view.grid_rowconfigure(1, weight=1)
+        view.grid_rowconfigure(3, weight=1)
+        ttk.Style().configure("Treeview", rowheight=28)
 
-        # แถบแสดงสถานะโหมดแก้ไขใบเบิก
+        # row 0: แถบแจ้งโหมดแก้ไขใบเบิก (แสดงเฉพาะตอนแก้ไข)
         self.edit_banner_frame = ctk.CTkFrame(view, fg_color=("#fef3c7", "#78350f"), corner_radius=8)
         self.lbl_edit_banner = ctk.CTkLabel(
-            self.edit_banner_frame, 
-            text="🔧 โหมดแก้ไขใบเบิก: REQ-XXXXXX", 
+            self.edit_banner_frame,
+            text="🔧 โหมดแก้ไขใบเบิก: REQ-XXXXXX",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=("#92400e", "#fde68a")
         )
         self.lbl_edit_banner.pack(side="left", padx=14, pady=8)
-
-        btn_cancel_edit = ctk.CTkButton(
-            self.edit_banner_frame, 
-            text="✖ ยกเลิกการแก้ไข / กลับหน้าปกติ", 
+        ctk.CTkButton(
+            self.edit_banner_frame,
+            text="✖ ยกเลิกการแก้ไข / กลับหน้าปกติ",
             fg_color="#ef4444", hover_color="#dc2626",
             height=28, width=190,
             command=self.exit_edit_mode
-        )
-        btn_cancel_edit.pack(side="right", padx=14, pady=8)
+        ).pack(side="right", padx=14, pady=8)
 
-        # Container สำหรับ 2 คอลัมน์ (ซ้าย/ขวา) - สัดส่วน 4:6 (ขยายฝั่งขวา 60% ให้รายการจัดขึ้นรถใหญ่เด่นชัดเป็นพิเศษ)
-        self.panels_container = ctk.CTkFrame(view, fg_color="transparent")
-        self.panels_container.grid(row=1, column=0, sticky="nsew")
-        self.panels_container.grid_columnconfigure(0, weight=4, uniform="panels")
-        self.panels_container.grid_columnconfigure(1, weight=6, uniform="panels")
-        self.panels_container.grid_rowconfigure(0, weight=1)
+        # row 1: แถบข้อมูลบิล (บรรทัดเดียว) — ช่องที่กรอกทุกใบอยู่ที่นี่
+        topbar = ctk.CTkFrame(view, corner_radius=10)
+        topbar.grid(row=1, column=0, padx=14, pady=(10, 0), sticky="ew")
+        topbar.grid_columnconfigure(2, weight=1)
 
-        # แผงซ้าย: กรอกข้อมูลขนส่งและเลือกแบตเตอรี่
-        left_panel = ctk.CTkScrollableFrame(self.panels_container, corner_radius=10)
-        left_panel.grid(row=0, column=0, padx=(14, 8), pady=14, sticky="nsew")
-        left_panel.grid_columnconfigure(1, weight=1)
+        def caption(col, text):
+            ctk.CTkLabel(topbar, text=text, font=ctk.CTkFont(size=12, weight="bold"), text_color="gray",
+                         anchor="w").grid(row=0, column=col, sticky="w", padx=(10, 0), pady=(6, 0))
 
-        ctk.CTkLabel(left_panel, text="🚚 1. ข้อมูลรถส่งของและลูกค้า", font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(4, 10)
-        )
+        caption(0, "เลขที่ใบเบิก")
+        self.entry_req_no = ctk.CTkEntry(topbar, width=150, height=34)
+        self.entry_req_no.grid(row=1, column=0, sticky="w", padx=(10, 0), pady=(0, 8))
 
-        ctk.CTkLabel(left_panel, text="เลขที่ใบเบิก:").grid(row=1, column=0, sticky="w", pady=3)
-        self.entry_req_no = ctk.CTkEntry(left_panel)
-        self.entry_req_no.grid(row=1, column=1, sticky="ew", pady=3, padx=(8, 0))
-
-        ctk.CTkLabel(left_panel, text="วันที่เบิก:").grid(row=2, column=0, sticky="w", pady=3)
-        self.entry_req_date = ctk.CTkEntry(left_panel)
+        caption(1, "วันที่เบิก")
+        self.entry_req_date = ctk.CTkEntry(topbar, width=105, height=34)
         self.entry_req_date.insert(0, datetime.now().strftime("%d/%m/%Y"))
-        self.entry_req_date.grid(row=2, column=1, sticky="ew", pady=3, padx=(8, 0))
+        self.entry_req_date.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(0, 8))
 
-        ctk.CTkLabel(left_panel, text="ทะเบียนรถส่ง:").grid(row=3, column=0, sticky="w", pady=3)
-        self.entry_vehicle = ctk.CTkEntry(left_panel, placeholder_text="เช่น 1ผข-4512 กทม. (ไม่ระบุก็ได้)")
-        self.entry_vehicle.grid(row=3, column=1, sticky="ew", pady=3, padx=(8, 0))
+        caption(2, "ร้านค้า/ลูกค้า *")
+        self.entry_customer = ctk.CTkEntry(topbar, height=34, placeholder_text="เช่น ร้านสหยนต์การช่าง, อู่ช่างเอก")
+        self.entry_customer.grid(row=1, column=2, sticky="ew", padx=(10, 0), pady=(0, 8))
 
-        ctk.CTkLabel(left_panel, text="คนขับ/ผู้เบิก:").grid(row=4, column=0, sticky="w", pady=3)
-        self.entry_driver = ctk.CTkEntry(left_panel, placeholder_text="ชื่อคนขับ / ผู้เบิก (ไม่ระบุก็ได้)")
-        self.entry_driver.grid(row=4, column=1, sticky="ew", pady=3, padx=(8, 0))
+        caption(3, "ทะเบียนรถ")
+        self.entry_vehicle = ctk.CTkEntry(topbar, width=140, height=34, placeholder_text="ไม่ระบุก็ได้")
+        self.entry_vehicle.grid(row=1, column=3, sticky="w", padx=(10, 0), pady=(0, 8))
 
-        ctk.CTkLabel(left_panel, text="ร้านค้า/ลูกค้า:*").grid(row=5, column=0, sticky="w", pady=3)
-        self.entry_customer = ctk.CTkEntry(left_panel, placeholder_text="เช่น ร้านสหยนต์การช่าง, อู่ช่างเอก")
-        self.entry_customer.grid(row=5, column=1, sticky="ew", pady=3, padx=(8, 0))
+        caption(4, "บิลอ้างอิง")
+        self.entry_ref_bill = ctk.CTkEntry(topbar, width=130, height=34, placeholder_text="เช่น SO-69012")
+        self.entry_ref_bill.grid(row=1, column=4, sticky="w", padx=(10, 0), pady=(0, 8))
 
-        ctk.CTkLabel(left_panel, text="สายส่ง/โซน:").grid(row=6, column=0, sticky="w", pady=3)
-        self.combo_route = ctk.CTkComboBox(left_panel, values=[
+        self.btn_details_toggle = ctk.CTkButton(
+            topbar, text="รายละเอียดการส่ง ▼", width=150, height=34,
+            fg_color=("#e2e8f0", "#334155"), text_color=("#0f172a", "#f8fafc"),
+            hover_color=("#cbd5e1", "#475569"),
+            command=lambda: self.set_details_open(not self.details_open)
+        )
+        self.btn_details_toggle.grid(row=1, column=5, sticky="e", padx=10, pady=(0, 8))
+
+        # row 2: รายละเอียดการส่ง (พับเก็บไว้ ไม่ต้องกรอกทุกใบ)
+        self.details_open = False
+        self.details_frame = ctk.CTkFrame(view, corner_radius=10)
+        self.details_frame.grid_columnconfigure((1, 3, 5), weight=1)
+
+        ctk.CTkLabel(self.details_frame, text="คนขับ/ผู้เบิก:").grid(row=0, column=0, padx=(12, 4), pady=10, sticky="w")
+        self.entry_driver = ctk.CTkEntry(self.details_frame, height=32, placeholder_text="ไม่ระบุก็ได้")
+        self.entry_driver.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
+
+        ctk.CTkLabel(self.details_frame, text="สายส่ง/โซน:").grid(row=0, column=2, padx=(0, 4), pady=10, sticky="w")
+        self.combo_route = ctk.CTkComboBox(self.details_frame, height=32, values=[
             "สายส่งบางนา - สมุทรปราการ",
             "สายส่งรังสิต - ปทุมธานี",
             "สายส่งพระราม 2 - มหาชัย",
@@ -302,37 +308,68 @@ class BatteryRequisitionApp(ctk.CTk):
             "สายส่งต่างจังหวัด / ชลบุรี"
         ])
         self.combo_route.set("")
-        self.combo_route.grid(row=6, column=1, sticky="ew", pady=3, padx=(8, 0))
+        self.combo_route.grid(row=0, column=3, padx=(0, 12), pady=10, sticky="ew")
 
-        ctk.CTkLabel(left_panel, text="บิลขายอ้างอิง:").grid(row=7, column=0, sticky="w", pady=3)
-        self.entry_ref_bill = ctk.CTkEntry(left_panel, placeholder_text="เช่น SO-69012, INV-0881")
-        self.entry_ref_bill.grid(row=7, column=1, sticky="ew", pady=3, padx=(8, 0))
+        ctk.CTkLabel(self.details_frame, text="หมายเหตุการส่ง:").grid(row=0, column=4, padx=(0, 4), pady=10, sticky="w")
+        self.entry_purpose = ctk.CTkEntry(self.details_frame, height=32, placeholder_text="เช่น มีลูกเก่าเทิร์น 4 ลูก, ส่งก่อน 11:00")
+        self.entry_purpose.grid(row=0, column=5, padx=(0, 12), pady=10, sticky="ew")
 
-        ctk.CTkLabel(left_panel, text="หมายเหตุการส่ง:").grid(row=8, column=0, sticky="w", pady=3)
-        self.entry_purpose = ctk.CTkEntry(left_panel, placeholder_text="เช่น มีลูกเก่าเทิร์น 4 ลูก, ส่งก่อน 11:00")
-        self.entry_purpose.grid(row=8, column=1, sticky="ew", pady=3, padx=(8, 0))
+        # row 3: สองแผง ซ้าย = ค้นหา/เลือกแบต, ขวา = รายการในบิล
+        self.panels_container = ctk.CTkFrame(view, fg_color="transparent")
+        self.panels_container.grid(row=3, column=0, sticky="nsew")
+        self.panels_container.grid_columnconfigure(0, weight=9, uniform="panels")
+        self.panels_container.grid_columnconfigure(1, weight=11, uniform="panels")
+        self.panels_container.grid_rowconfigure(0, weight=1)
 
-        sep = ctk.CTkFrame(left_panel, height=2, fg_color=("gray75", "gray30"))
-        sep.grid(row=9, column=0, columnspan=2, sticky="ew", pady=12)
+        left_panel = ctk.CTkFrame(self.panels_container, corner_radius=10)
+        left_panel.grid(row=0, column=0, padx=(14, 7), pady=10, sticky="nsew")
+        left_panel.grid_columnconfigure(0, weight=1)
+        left_panel.grid_rowconfigure(5, weight=1)
 
-        # หัวข้อส่วนที่ 2: ค้นหาและเลือกรุ่นแบตเตอรี่ (Embedded Live Match Table)
-        sec2_header = ctk.CTkFrame(left_panel, fg_color="transparent")
-        sec2_header.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(2, 2))
-        ctk.CTkLabel(sec2_header, text="⚡ 2. ค้นหาและเลือกรุ่นแบตเตอรี่", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        header = ctk.CTkFrame(left_panel, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        ctk.CTkLabel(header, text="⚡ ค้นหาและเลือกรุ่นแบตเตอรี่", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        self.lbl_match_count = ctk.CTkLabel(header, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color="#0e7490")
+        self.lbl_match_count.pack(side="right")
+
+        self.entry_battery_search = ctk.CTkEntry(
+            left_panel,
+            placeholder_text="พิมพ์รุ่น/ยี่ห้อ เช่น N100*2 แล้วกด Enter",
+            height=40,
+            font=ctk.CTkFont(size=15)
+        )
+        self.entry_battery_search.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 4))
+        self.entry_battery_search.bind("<KeyRelease>", self.on_live_search_key)
+        self.entry_battery_search.bind("<Return>", self.on_live_search_enter)
+        self.entry_battery_search.bind("<Down>", self.on_live_search_down)
+        self.entry_battery_search.bind("<Up>", self.on_live_search_up)
+        self.entry_battery_search.bind("<Escape>", self.clear_live_search)
+
+        new_row = ctk.CTkFrame(left_panel, fg_color="transparent")
+        new_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
+        new_row.grid_columnconfigure((0, 1), weight=1, uniform="newbtn")
         self.btn_new_battery = ctk.CTkButton(
-            sec2_header, text="➕ เพิ่มแบตรุ่นใหม่",
+            new_row, text="➕ เพิ่มแบตรุ่นใหม่",
             fg_color="#0e7490", hover_color="#155e75",
-            height=28, width=120, font=ctk.CTkFont(size=12, weight="bold"),
+            height=32, font=ctk.CTkFont(size=13, weight="bold"),
             command=lambda: self.open_new_battery_dialog(),
         )
-        self.btn_new_battery.pack(side="right")
-        self.lbl_match_count = ctk.CTkLabel(sec2_header, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color="#0e7490")
-        self.lbl_match_count.pack(side="right", padx=(6, 8))
+        self.btn_new_battery.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.btn_add_custom = ctk.CTkButton(
+            new_row, text="📦 เพิ่มอะไหล่/สินค้าอื่น",
+            fg_color="#ea580c", hover_color="#c2410c",
+            height=32, font=ctk.CTkFont(size=13, weight="bold"),
+            command=lambda: self.open_custom_item_dialog(),
+        )
+        self.btn_add_custom.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        # ปุ่มลัดยี่ห้อยอดนิยม (Quick Brand Chips)
+        ctk.CTkLabel(
+            left_panel, text="Enter หรือดับเบิลคลิกแถว = เพิ่มลงบิล  •  F2 = กลับมาช่องค้นหา  •  Esc = ล้างคำค้น",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
+        ).grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 2))
+
         brand_chips_frame = ctk.CTkScrollableFrame(left_panel, height=36, orientation="horizontal", fg_color="transparent")
-        brand_chips_frame.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 2))
-        
+        brand_chips_frame.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 2))
         top_brands = ["ทั้งหมด", "FB", "GS", "YUASA", "BOLIDEN", "AMARON", "SOLITE", "ESB", "VARTA", "SCHAEFFLER", "NIKO", "BOSCH"]
         self.brand_chip_buttons = {}
         self.selected_brand_chip = "ทั้งหมด"
@@ -348,29 +385,10 @@ class BatteryRequisitionApp(ctk.CTk):
             btn_chip.pack(side="left", padx=2)
             self.brand_chip_buttons[b] = btn_chip
 
-        # กล่องพิมพ์ค้นหาด่วน
-        search_box_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-        search_box_frame.grid(row=12, column=0, columnspan=2, sticky="ew", pady=2)
-        search_box_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(search_box_frame, text="🔍 ค้นหารุ่น:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=(0, 6))
-        self.entry_battery_search = ctk.CTkEntry(
-            search_box_frame, 
-            placeholder_text="พิมพ์ตัวเลข รุ่น หรือยี่ห้อ แล้วกด Enter เพื่อดูรายละเอียด...",
-            height=34,
-            font=ctk.CTkFont(size=13)
-        )
-        self.entry_battery_search.grid(row=0, column=1, sticky="ew")
-        self.entry_battery_search.bind("<KeyRelease>", self.on_live_search_key)
-        self.entry_battery_search.bind("<Return>", self.on_live_search_enter)
-        self.entry_battery_search.bind("<Down>", self.on_live_search_down)
-        self.entry_battery_search.bind("<Up>", self.on_live_search_up)
-        self.entry_battery_search.bind("<Escape>", self.clear_live_search)
-
-        # ตารางผลลัพธ์การค้นหาแบบสด (Live Matches Treeview)
         tree_container = ctk.CTkFrame(left_panel, corner_radius=6)
-        tree_container.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+        tree_container.grid(row=5, column=0, sticky="nsew", padx=12, pady=(2, 4))
         tree_container.grid_columnconfigure(0, weight=1)
+        tree_container.grid_rowconfigure(0, weight=1)
 
         self.matches_tree = ttk.Treeview(
             tree_container,
@@ -383,123 +401,105 @@ class BatteryRequisitionApp(ctk.CTk):
         self.matches_tree.heading("code", text="รหัส / รุ่นแบตเตอรี่")
         self.matches_tree.heading("capacity", text="ความจุ")
         self.matches_tree.heading("action", text="ดับเบิลคลิกเพิ่ม")
-
         self.matches_tree.column("brand", width=75, minwidth=70, anchor="center", stretch=False)
-        self.matches_tree.column("code", width=240, minwidth=170, anchor="w", stretch=True)
+        self.matches_tree.column("code", width=220, minwidth=150, anchor="w", stretch=True)
         self.matches_tree.column("capacity", width=65, minwidth=60, anchor="center", stretch=False)
-        self.matches_tree.column("action", width=105, minwidth=95, anchor="center", stretch=False)
+        self.matches_tree.column("action", width=100, minwidth=90, anchor="center", stretch=False)
 
         tree_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=self.matches_tree.yview)
         self.matches_tree.configure(yscrollcommand=tree_scroll.set)
-
         self.matches_tree.grid(row=0, column=0, sticky="nsew", padx=(2, 0), pady=2)
         tree_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
 
-        # ดับเบิ้ลคลิก (Double Click) หรือกด Enter เพื่อเพิ่มลงใบเบิก (คลิก 1 ครั้งจะเป็นการเลือกแถวตามปกติ)
         self.matches_tree.bind("<Double-1>", self.on_match_row_double_click)
         self.matches_tree.bind("<ButtonRelease-1>", self.on_match_row_click)
         self.matches_tree.bind("<Return>", lambda e: self.add_selected_match_to_cart(clear_search=True))
 
-        # แถบควบคุมด้านล่างตาราง: จำนวน + หมายเหตุ + ปุ่มเพิ่ม
+        # จำนวนและหมายเหตุของรุ่นที่กำลังจะเพิ่ม
         action_bar = ctk.CTkFrame(left_panel, fg_color="transparent")
-        action_bar.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+        action_bar.grid(row=6, column=0, sticky="ew", padx=12, pady=(2, 2))
         action_bar.grid_columnconfigure(3, weight=1)
 
         ctk.CTkLabel(action_bar, text="จำนวน:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self.entry_qty = ctk.CTkEntry(action_bar, width=50, height=32, justify="center", font=ctk.CTkFont(size=13, weight="bold"))
+        self.entry_qty = ctk.CTkEntry(action_bar, width=56, height=34, justify="center", font=ctk.CTkFont(size=14, weight="bold"))
         self.entry_qty.insert(0, "1")
         self.entry_qty.grid(row=0, column=1, sticky="w", padx=(0, 2))
         self.entry_qty.bind("<Return>", self.add_from_search)
-
         ctk.CTkLabel(action_bar, text="ลูก", font=ctk.CTkFont(size=12)).grid(row=0, column=2, sticky="w", padx=(0, 8))
-
-        self.entry_item_remark = ctk.CTkEntry(action_bar, height=32, placeholder_text="หมายเหตุ เช่น เทิร์น, ขั้ว L...")
-        self.entry_item_remark.grid(row=0, column=3, sticky="ew", padx=(0, 8))
+        self.entry_item_remark = ctk.CTkEntry(action_bar, height=34, placeholder_text="หมายเหตุ เช่น เทิร์น, ขั้ว L...")
+        self.entry_item_remark.grid(row=0, column=3, sticky="ew")
         self.entry_item_remark.bind("<Return>", self.add_from_search)
 
-        btn_add_match = ctk.CTkButton(
-            action_bar, text="➕ เพิ่มลงบิล (Enter)",
-            fg_color="#15803d", hover_color="#166534",
-            height=32, width=140, font=ctk.CTkFont(weight="bold"),
-            command=self.add_from_search
-        )
-        btn_add_match.grid(row=0, column=4, sticky="e")
+        self.lbl_quick_toast = ctk.CTkLabel(left_panel, text="", font=ctk.CTkFont(size=12, weight="bold"),
+                                            text_color="#15803d", anchor="w")
+        self.lbl_quick_toast.grid(row=7, column=0, sticky="ew", padx=14, pady=(0, 8))
 
-        btn_add_custom = ctk.CTkButton(
-            action_bar, text="📦 ➕ เพิ่มอะไหล่อื่น",
-            fg_color="#ea580c", hover_color="#c2410c",
-            height=32, width=130, font=ctk.CTkFont(weight="bold"),
-            command=lambda: self.open_custom_item_dialog(),
-        )
-        btn_add_custom.grid(row=0, column=5, sticky="e", padx=(6, 0))
-        self.lbl_quick_toast = ctk.CTkLabel(left_panel, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color="#15803d")
-        self.lbl_quick_toast.grid(row=15, column=0, columnspan=2, sticky="w", pady=(0, 4))
-
-        # แผงขวา: รายการแบตเตอรี่ที่เลือก + สรุป + ปุ่มออก PDF
+        # แผงขวา: รายการในบิล
         right_panel = ctk.CTkFrame(self.panels_container, corner_radius=10)
-        right_panel.grid(row=0, column=1, padx=(8, 14), pady=14, sticky="nsew")
+        right_panel.grid(row=0, column=1, padx=(7, 14), pady=10, sticky="nsew")
         right_panel.grid_rowconfigure(1, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
 
-        header_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
-        header_frame.grid(row=0, column=0, padx=14, pady=(12, 0), sticky="ew")
-        header_frame.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            header_frame,
-            text="📋 รายการแบตเตอรี่จัดขึ้นรถ",
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
-
-        # ยอดสำหรับตรวจนับ: แบตรวมเป็นลูก + สินค้าอื่นแยกตามชื่อ (ข้อความยาวจะขึ้นบรรทัดใหม่)
-        self.lbl_cart_summary = ctk.CTkLabel(
-            header_frame,
-            text="ยังไม่มีรายการ",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#0e7490",
-            justify="left",
-            anchor="w",
-        )
-        self.lbl_cart_summary.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        header_frame.bind(
-            "<Configure>",
-            lambda e: self.lbl_cart_summary.configure(wraplength=max(e.width - 10, 200)),
-        )
+        self.lbl_cart_title = ctk.CTkLabel(right_panel, text="📋 รายการในบิล", font=ctk.CTkFont(size=16, weight="bold"), anchor="w")
+        self.lbl_cart_title.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
 
         self.cart_frame = ctk.CTkScrollableFrame(right_panel, corner_radius=8)
-        self.cart_frame.grid(row=1, column=0, padx=14, pady=6, sticky="nsew")
+        self.cart_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
         self.cart_frame.grid_columnconfigure(1, weight=1)
 
-        checklist_hint = ctk.CTkFrame(right_panel, fg_color=("#e0f2fe", "#164e63"), corner_radius=6)
-        checklist_hint.grid(row=2, column=0, padx=14, pady=(4, 6), sticky="ew")
-        ctk.CTkLabel(
-            checklist_hint, 
-            text="⚡ พิมพ์จำนวนแล้วกด Enter ข้ามแถวได้ทันที | กด ▲ / ▼ เพื่อสลับลำดับการจัดขึ้นรถ (หรือกด Ctrl+↑/↓)",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color=("#0369a1", "#bae6fd")
-        ).pack(padx=10, pady=6)
+        # row 4: แถบล่างติดจอ — สรุปตรวจนับ + ปุ่มบันทึก
+        bottom_bar = ctk.CTkFrame(view, corner_radius=10)
+        bottom_bar.grid(row=4, column=0, padx=14, pady=(0, 12), sticky="ew")
+        bottom_bar.grid_columnconfigure(0, weight=1)
 
-        actions_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions_frame.grid(row=3, column=0, padx=14, pady=(6, 12), sticky="ew")
-        actions_frame.grid_columnconfigure((0, 1), weight=1)
-
-        btn_clear = ctk.CTkButton(
-            actions_frame, text="🗑️ ล้างข้อมูล",
-            fg_color="#64748b", hover_color="#475569",
-            height=46,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self.clear_requisition_form
+        self.lbl_cart_summary = ctk.CTkLabel(
+            bottom_bar, text="ยังไม่มีรายการ",
+            font=ctk.CTkFont(size=15, weight="bold"), text_color="#0e7490",
+            justify="left", anchor="w",
         )
-        btn_clear.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.lbl_cart_summary.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
+        bottom_bar.bind(
+            "<Configure>",
+            lambda e: self.lbl_cart_summary.configure(wraplength=max(e.width - 420, 200)),
+        )
+
+        ctk.CTkButton(
+            bottom_bar, text="🗑️ ล้าง",
+            fg_color=("#cbd5e1", "#334155"), text_color=("#0f172a", "#f8fafc"),
+            hover_color=("#94a3b8", "#475569"),
+            height=40, width=70,
+            command=self.clear_requisition_form
+        ).grid(row=0, column=1, padx=(0, 8), pady=10)
 
         self.btn_save_pdf = ctk.CTkButton(
-            actions_frame, text="🖨️ บันทึกและพิมพ์ PDF (A5 แนวนอน)",
+            bottom_bar, text="🖨️ บันทึกและพิมพ์ PDF",
             fg_color="#0e7490", hover_color="#155e75",
-            height=46,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            height=48, width=260,
+            font=ctk.CTkFont(size=16, weight="bold"),
             command=self.save_and_print_pdf
         )
-        self.btn_save_pdf.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+        self.btn_save_pdf.grid(row=0, column=2, padx=(0, 10), pady=10)
 
         return view
+
+    def set_details_open(self, is_open):
+        self.details_open = bool(is_open)
+        if self.details_open:
+            self.details_frame.grid(row=2, column=0, padx=14, pady=(6, 0), sticky="ew")
+        else:
+            self.details_frame.grid_remove()
+        self.refresh_details_toggle()
+
+    def refresh_details_toggle(self):
+        """ปุ่มพับ/ขยาย: ถ้าพับอยู่แต่มีข้อมูลในช่องที่ซ่อน ให้ขึ้นจุด • เตือน"""
+        driver = self.entry_driver.get().strip()
+        has_data = bool(
+            (driver and driver != "-") or self.combo_route.get().strip() or self.entry_purpose.get().strip()
+        )
+        text = f"รายละเอียดการส่ง {'▲' if self.details_open else '▼'}"
+        if has_data and not self.details_open:
+            text += " •"
+        self.btn_details_toggle.configure(text=text)
 
     def refresh_req_screen(self):
         if not self.editing_req_id:
@@ -858,88 +858,56 @@ class BatteryRequisitionApp(ctk.CTk):
         for widget in self.cart_frame.winfo_children():
             widget.destroy()
 
-        # Rebuild the keyboard-navigation lists together with the row widgets.
-        # Keeping entries from an earlier render makes Enter target a widget
-        # that has already been destroyed.
+        # สร้างรายการช่องกรอกใหม่พร้อมแถว ป้องกัน Enter ไปโดน widget ที่ถูกทำลายแล้ว
         self.cart_qty_entries = []
-        self.cart_rem_entries = []
         self.cart_name_entries = []
         if not self.cart_items:
-            lbl_empty = ctk.CTkLabel(
-                self.cart_frame, 
-                text="ยังไม่มีรายการแบตเตอรี่\nกรุณาค้นหารุ่นแบตจากแผงด้านซ้ายแล้วกด Enter หรือปุ่ม 'เพิ่มลงบิล'", 
+            ctk.CTkLabel(
+                self.cart_frame,
+                text="ยังไม่มีรายการในบิล\nพิมพ์รุ่นแบตที่ช่องค้นหาด้านซ้าย แล้วกด Enter",
                 text_color="gray",
+                font=ctk.CTkFont(size=14),
                 pady=40
-            )
-            lbl_empty.pack()
+            ).pack()
             self.update_cart_summary()
             return
 
         for idx, item in enumerate(self.cart_items):
+            remark = str(item.get("remark") or "").strip()
             row_frame = ctk.CTkFrame(self.cart_frame, corner_radius=8)
-            row_frame.pack(fill="x", padx=6, pady=6)
+            row_frame.pack(fill="x", padx=4, pady=3)
 
-            # ==========================================
-            # แถวที่ 1 (แถวบน): ป้ายลำดับ/ยี่ห้อ + กล่องข้อความพิมพ์ชื่อรุ่น/คำได้อิสระ (Inline Editable)
-            # ==========================================
-            top_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-            top_frame.pack(fill="x", padx=12, pady=(8, 4))
+            line = ctk.CTkFrame(row_frame, fg_color="transparent")
+            line.pack(fill="x", padx=8, pady=(6, 2 if remark else 6))
 
-            badge = ctk.CTkLabel(
-                top_frame, 
-                text=f"{idx+1}. [{item['brand'] if is_battery(item) else item_category(item)}]", 
-                font=ctk.CTkFont(weight="bold", size=15),
-                anchor="w"
-            )
-            badge.pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(line, text=f"{idx+1}.", width=28, font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
 
-            entry_inline_name = ctk.CTkEntry(
-                top_frame, 
-                height=32, 
-                font=ctk.CTkFont(size=14, weight="bold")
-            )
-            name_val = str(item.get("item_name") or item.get("item_code", ""))
-            entry_inline_name.insert(0, name_val)
-            entry_inline_name.pack(side="left", fill="x", expand=True)
-            self.cart_name_entries.append(entry_inline_name)
-
-            entry_inline_name.bind(
-                "<KeyRelease>", 
-                lambda e, i=idx, ent=entry_inline_name: self.on_cart_name_change(i, ent)
-            )
-            entry_inline_name.bind("<Return>", lambda e, i=idx: self.jump_from_name_to_rem(i))
-            entry_inline_name.bind("<Down>", lambda e, i=idx: self.jump_from_name_to_rem(i))
-
-            # ==========================================
-            # แถวที่ 2 (แถวล่าง): ช่องพิมพ์หมายเหตุ (ซ้าย) + กลุ่มปุ่มควบคุมทั้งหมด (ขวา)
-            # ==========================================
-            bot_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-            bot_frame.pack(fill="x", padx=12, pady=(2, 8))
-
-            controls_frame = ctk.CTkFrame(bot_frame, fg_color="transparent")
-            controls_frame.pack(side="right")
-
-            btn_del = ctk.CTkButton(
-                controls_frame, text="❌", width=34, height=30,
+            ctk.CTkButton(
+                line, text="❌", width=34, height=32,
                 fg_color="#ef4444", hover_color="#dc2626",
-                font=ctk.CTkFont(size=13),
                 command=lambda i=idx: self.remove_cart_item(i)
-            )
-            btn_del.pack(side="right", padx=(6, 0))
+            ).pack(side="right")
 
-            qty_control = ctk.CTkFrame(controls_frame, fg_color="transparent")
-            qty_control.pack(side="right", padx=4)
-
-            btn_minus = ctk.CTkButton(
-                qty_control, text="➖", width=28, height=30,
+            btn_more = ctk.CTkButton(
+                line, text="⋯", width=34, height=32,
                 fg_color=("#cbd5e1", "#334155"), text_color=("black", "white"),
-                font=ctk.CTkFont(size=13, weight="bold"),
-                command=lambda i=idx: self.adjust_cart_qty(i, -1)
+                hover_color=("#94a3b8", "#475569"),
+                font=ctk.CTkFont(size=16, weight="bold"),
             )
-            btn_minus.pack(side="left", padx=1)
+            btn_more.configure(command=lambda i=idx, b=btn_more: self.show_cart_row_menu(i, b))
+            btn_more.pack(side="right", padx=(0, 4))
+
+            qty_control = ctk.CTkFrame(line, fg_color="transparent")
+            qty_control.pack(side="right", padx=6)
+
+            ctk.CTkButton(
+                qty_control, text="➖", width=30, height=32,
+                fg_color=("#cbd5e1", "#334155"), text_color=("black", "white"),
+                command=lambda i=idx: self.adjust_cart_qty(i, -1)
+            ).pack(side="left", padx=1)
 
             entry_inline_qty = ctk.CTkEntry(
-                qty_control, width=48, height=30,
+                qty_control, width=52, height=32,
                 justify="center", font=ctk.CTkFont(size=15, weight="bold")
             )
             entry_inline_qty.insert(0, str(item["quantity"]))
@@ -956,75 +924,45 @@ class BatteryRequisitionApp(ctk.CTk):
             entry_inline_qty.bind("<Alt-Up>", lambda e, i=idx: self.move_cart_item(i, -1))
             entry_inline_qty.bind("<Alt-Down>", lambda e, i=idx: self.move_cart_item(i, 1))
 
-            btn_plus = ctk.CTkButton(
-                qty_control, text="➕", width=28, height=30,
+            ctk.CTkButton(
+                qty_control, text="➕", width=30, height=32,
                 fg_color=("#cbd5e1", "#334155"), text_color=("black", "white"),
-                font=ctk.CTkFont(size=13, weight="bold"),
                 command=lambda i=idx: self.adjust_cart_qty(i, +1)
-            )
-            btn_plus.pack(side="left", padx=1)
+            ).pack(side="left", padx=1)
 
-            unit_text = str(item.get("unit") or "ลูก")
-            ctk.CTkLabel(qty_control, text=unit_text, font=ctk.CTkFont(size=13, weight="bold"), width=28).pack(side="left", padx=2)
+            ctk.CTkLabel(qty_control, text=str(item.get("unit") or "ลูก"),
+                         font=ctk.CTkFont(size=13, weight="bold"), width=34).pack(side="left", padx=2)
 
-            btn_edit_row = ctk.CTkButton(
-                controls_frame, text="✏️ แก้ไข", width=62, height=30,
-                command=lambda i=idx: self.open_edit_cart_item_dialog(i)
-            )
-            btn_edit_row.pack(side="right", padx=4)
+            entry_inline_name = ctk.CTkEntry(line, height=32, font=ctk.CTkFont(size=14, weight="bold"))
+            entry_inline_name.insert(0, str(item.get("item_name") or item.get("item_code", "")))
+            entry_inline_name.pack(side="left", fill="x", expand=True, padx=(4, 6))
+            self.cart_name_entries.append(entry_inline_name)
+            entry_inline_name.bind("<KeyRelease>", lambda e, i=idx, ent=entry_inline_name: self.on_cart_name_change(i, ent))
+            entry_inline_name.bind("<Return>", lambda e, i=idx: self.jump_from_name_to_rem(i))
+            entry_inline_name.bind("<Down>", lambda e, i=idx: self.jump_from_name_to_rem(i))
 
-            reorder_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
-            reorder_frame.pack(side="right", padx=(0, 4))
-
-            btn_up = ctk.CTkButton(
-                reorder_frame, text="▲", width=28, height=30,
-                font=ctk.CTkFont(size=11, weight="bold"),
-                fg_color=("#e2e8f0", "#334155") if idx > 0 else ("#f1f5f9", "#1e293b"),
-                text_color=("#0f172a", "#f8fafc") if idx > 0 else ("#94a3b8", "#64748b"),
-                hover_color="#cbd5e1" if idx > 0 else ("#f1f5f9", "#1e293b"),
-                state="normal" if idx > 0 else "disabled",
-                command=lambda i=idx: self.move_cart_item(i, -1)
-            )
-            btn_up.pack(side="left", padx=1)
-
-            btn_down = ctk.CTkButton(
-                reorder_frame, text="▼", width=28, height=30,
-                font=ctk.CTkFont(size=11, weight="bold"),
-                fg_color=("#e2e8f0", "#334155") if idx < len(self.cart_items) - 1 else ("#f1f5f9", "#1e293b"),
-                text_color=("#0f172a", "#f8fafc") if idx < len(self.cart_items) - 1 else ("#94a3b8", "#64748b"),
-                hover_color="#cbd5e1" if idx < len(self.cart_items) - 1 else ("#f1f5f9", "#1e293b"),
-                state="normal" if idx < len(self.cart_items) - 1 else "disabled",
-                command=lambda i=idx: self.move_cart_item(i, 1)
-            )
-            btn_down.pack(side="left", padx=1)
-
-            # ฝั่งซ้าย: ช่องพิมพ์หมายเหตุ/รายละเอียดเพิ่มเติม ขยายเต็มพื้นที่ที่เหลือ
-            rem_frame = ctk.CTkFrame(bot_frame, fg_color="transparent")
-            rem_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-            ctk.CTkLabel(rem_frame, text="หมายเหตุ:", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray").pack(
-                side="left", padx=(0, 6)
-            )
-            entry_inline_rem = ctk.CTkEntry(
-                rem_frame, height=32,
-                placeholder_text="เทิร์นลูกเก่า, ขั้ว L, ส่งด่วน...",
-                font=ctk.CTkFont(size=13)
-            )
-            if item.get("remark"):
-                entry_inline_rem.insert(0, str(item["remark"]))
-            entry_inline_rem.pack(side="left", fill="x", expand=True)
-            self.cart_rem_entries.append(entry_inline_rem)
-
-            entry_inline_rem.bind(
-                "<KeyRelease>", 
-                lambda e, i=idx, ent=entry_inline_rem: self.on_cart_remark_change(i, ent)
-            )
-            entry_inline_rem.bind("<Return>", lambda e, i=idx: self.jump_to_next_cart_rem(i))
-            entry_inline_rem.bind("<Down>", lambda e, i=idx: self.jump_to_next_cart_rem(i))
-            entry_inline_rem.bind("<Up>", lambda e, i=idx: self.jump_to_prev_cart_rem(i))
-
+            if remark:
+                ctk.CTkLabel(
+                    row_frame, text=f"หมายเหตุ: {remark}", anchor="w",
+                    font=ctk.CTkFont(size=12), text_color=("#475569", "#94a3b8")
+                ).pack(fill="x", padx=(44, 8), pady=(0, 6))
 
         self.update_cart_summary()
+
+    def show_cart_row_menu(self, index, anchor_button):
+        """เมนู ⋯ ของแต่ละรายการ: แก้ไขรายละเอียด/หมายเหตุ และเลื่อนลำดับ"""
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="✏️ แก้ไขรายละเอียด / หมายเหตุ", command=lambda: self.open_edit_cart_item_dialog(index))
+        menu.add_separator()
+        menu.add_command(label="▲ เลื่อนขึ้น", command=lambda: self.move_cart_item(index, -1),
+                         state="normal" if index > 0 else "disabled")
+        menu.add_command(label="▼ เลื่อนลง", command=lambda: self.move_cart_item(index, 1),
+                         state="normal" if index < len(self.cart_items) - 1 else "disabled")
+        try:
+            menu.tk_popup(anchor_button.winfo_rootx(), anchor_button.winfo_rooty() + anchor_button.winfo_height())
+        finally:
+            menu.grab_release()
+        return menu
 
     def move_cart_item(self, index, direction):
         new_index = index + direction
@@ -1069,32 +1007,15 @@ class BatteryRequisitionApp(ctk.CTk):
                 pass
         return "break"
 
-    def jump_to_next_cart_rem(self, current_idx):
-        next_idx = current_idx + 1
-        if next_idx < len(self.cart_rem_entries):
-            self.cart_rem_entries[next_idx].focus()
-            self.cart_rem_entries[next_idx].select_range(0, "end")
-        else:
-            self.btn_save_pdf.focus()
-
-    def jump_to_prev_cart_rem(self, current_idx):
-        prev_idx = current_idx - 1
-        if prev_idx >= 0:
-            self.cart_rem_entries[prev_idx].focus()
-            self.cart_rem_entries[prev_idx].select_range(0, "end")
-
-    def on_cart_remark_change(self, index, entry_widget):
-        if 0 <= index < len(self.cart_items):
-            self.cart_items[index]["remark"] = entry_widget.get().strip()
-
     def on_cart_name_change(self, index, entry_widget):
         if 0 <= index < len(self.cart_items):
             self.cart_items[index]["item_name"] = entry_widget.get().strip()
 
     def jump_from_name_to_rem(self, current_idx):
-        if current_idx < len(self.cart_rem_entries):
-            self.cart_rem_entries[current_idx].focus()
-            self.cart_rem_entries[current_idx].select_range(0, "end")
+        """Enter/↓ ในช่องชื่อ: ไปช่องจำนวนของแถวเดียวกัน"""
+        if current_idx < len(self.cart_qty_entries):
+            self.cart_qty_entries[current_idx].focus()
+            self.cart_qty_entries[current_idx].select_range(0, "end")
         return "break"
 
     def _prefill_from_search(self, prefill_text, prefill_qty, prefill_remark):
@@ -1553,11 +1474,13 @@ class BatteryRequisitionApp(ctk.CTk):
         self.update_cart_summary()
 
     def update_cart_summary(self):
-        if not self.cart_items:
+        count = len(self.cart_items)
+        self.lbl_cart_title.configure(text=f"📋 รายการในบิล ({count})" if count else "📋 รายการในบิล")
+        if not count:
             self.lbl_cart_summary.configure(text="ยังไม่มีรายการ")
             return
         breakdown = format_breakdown(count_breakdown(self.cart_items))
-        self.lbl_cart_summary.configure(text=f"ตรวจนับ ({len(self.cart_items)} รายการ): {breakdown}")
+        self.lbl_cart_summary.configure(text=f"ตรวจนับ: {breakdown}")
 
     def remove_cart_item(self, index):
         if 0 <= index < len(self.cart_items):
@@ -1572,7 +1495,7 @@ class BatteryRequisitionApp(ctk.CTk):
         if hasattr(self, "edit_banner_frame"):
             self.edit_banner_frame.grid_forget()
         if hasattr(self, "btn_save_pdf"):
-            self.btn_save_pdf.configure(text="🖨️ บันทึกและพิมพ์ PDF (A5 แนวนอน)", fg_color="#0e7490", hover_color="#155e75")
+            self.btn_save_pdf.configure(text="🖨️ บันทึกและพิมพ์ PDF", fg_color="#0e7490", hover_color="#155e75")
         self.cart_items = []
         self.render_cart_items()
         self.entry_vehicle.delete(0, "end")
@@ -1582,6 +1505,7 @@ class BatteryRequisitionApp(ctk.CTk):
         self.entry_purpose.delete(0, "end")
         if hasattr(self, "combo_route"):
             self.combo_route.set("")
+        self.set_details_open(False)
         self.refresh_req_screen()
 
     def save_and_print_pdf(self):
@@ -2280,6 +2204,15 @@ class BatteryRequisitionApp(ctk.CTk):
         self.entry_ref_bill.insert(0, req.get("ref_bill_no", ""))
         self.entry_purpose.delete(0, "end")
         self.entry_purpose.insert(0, req.get("purpose", ""))
+
+        # เปิดรายละเอียดการส่งให้เห็น ถ้าใบนี้มีข้อมูลในช่องที่ปกติพับไว้
+        self.refresh_details_toggle()
+        has_hidden = any([
+            str(req.get("driver_name") or "").strip() not in ("", "-"),
+            str(req.get("route_zone") or "").strip(),
+            str(req.get("purpose") or "").strip(),
+        ])
+        self.set_details_open(has_hidden)
 
         # ใส่รายการสินค้าลงตะกร้า
         self.cart_items = [dict(it) for it in items]

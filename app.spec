@@ -1,8 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-block_cipher = None
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 # รวบรวมไฟล์ Asset และธีมของ CustomTkinter
 ctk_datas = collect_data_files('customtkinter')
@@ -23,12 +21,19 @@ hidden_imports = [
     'services',
     'database',
     'ui',
+    'uharfbuzz',
+    'fontTools',
 ] + collect_submodules('customtkinter')
+
+# uharfbuzz (จัดรูปตัวอักษรไทยใน PDF) เป็นไลบรารีคอมไพล์ ต้องรวมไฟล์ทั้งชุด
+hb_datas, hb_binaries, hb_hidden = collect_all('uharfbuzz')
+added_datas += hb_datas
+hidden_imports += hb_hidden
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=hb_binaries,
     datas=added_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -37,11 +42,10 @@ a = Analysis(
     excludes=['matplotlib', 'scipy', 'pandas', 'numpy', 'IPython', 'notebook', 'tkinter.test'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,

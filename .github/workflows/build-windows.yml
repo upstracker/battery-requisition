@@ -1,4 +1,4 @@
-name: Build Windows Installer (Win 7/8/10/11)
+name: Build Windows Installer (Windows 10/11)
 
 on:
   push:
@@ -13,10 +13,10 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.8.10 (Max Windows 7/8/10/11 Compatibility)
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.8.10'
+          python-version: '3.12'
           architecture: 'x64'
 
       - name: Install Dependencies
@@ -24,9 +24,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Run Tests (รวมการสร้าง PDF ภาษาไทยบน Windows)
+        run: |
+          python -m unittest discover -s tests
+
       - name: Build Application with PyInstaller
         run: |
           pyinstaller app.spec --clean -y
+
+      - name: Check Built Program
+        run: |
+          if (!(Test-Path "dist\BatteryRequisition\BatteryRequisition.exe")) { throw "ไม่พบ BatteryRequisition.exe" }
 
       - name: Install Inno Setup Compiler
         run: |
@@ -38,18 +46,18 @@ jobs:
 
       - name: Package Portable Zip
         run: |
-          Compress-Archive -Path dist\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_v1.0.0.zip
+          Compress-Archive -Path dist\BatteryRequisition\* -DestinationPath dist_installer\BatteryRequisition_Portable_v1.1.0.zip
 
       - name: Upload Installer (.exe) Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Setup_BatteryRequisition_v1.0.0_Installer
-          path: dist_installer/Setup_BatteryRequisition_v1.0.0.exe
+          name: Setup_BatteryRequisition_v1.1.0_Installer
+          path: dist_installer/Setup_BatteryRequisition_v1.1.0.exe
           if-no-files-found: error
 
       - name: Upload Portable (.zip) Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BatteryRequisition_Portable_v1.0.0_Zip
-          path: dist_installer/BatteryRequisition_Portable_v1.0.0.zip
+          name: BatteryRequisition_Portable_v1.1.0_Zip
+          path: dist_installer/BatteryRequisition_Portable_v1.1.0.zip
           if-no-files-found: error

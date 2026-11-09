@@ -1,10 +1,10 @@
 ; =====================================================================
 ; Inno Setup Script: ระบบออกใบเบิกจ่ายแบตเตอรี่ขึ้นรถส่งของ (A5 Landscape)
-; รองรับระบบปฏิบัติการ Windows 7 SP1, Windows 8, 8.1, 10 และ 11
+; รองรับระบบปฏิบัติการ Windows 10 และ 11
 ; =====================================================================
 
 #define MyAppName "ระบบออกใบเบิกจ่ายแบตเตอรี่ขึ้นรถส่งของ"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "คลังแบตเตอรี่และบริการ"
 #define MyAppExeName "BatteryRequisition.exe"
 #define MyAppAssocName "Battery Requisition Slip"
@@ -19,7 +19,7 @@ DefaultDirName={autopf}\BatteryRequisitionApp
 DefaultGroupName=ระบบออกใบเบิกแบตเตอรี่
 AllowNoIcons=yes
 OutputDir=dist_installer
-OutputBaseFilename=Setup_BatteryRequisition_v1.0.0
+OutputBaseFilename=Setup_BatteryRequisition_v1.1.0
 SetupIconFile=assets\car_battery.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
@@ -27,8 +27,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes
 
-; กำหนดความเข้ากันได้ย้อนหลัง: รองรับตั้งแต่ Windows 7 SP1 ขึ้นไป (Kernel 6.1sp1)
-MinVersion=6.1sp1
+; รองรับ Windows 10 และ 11 (Python 3.12 ไม่รองรับ Windows 7/8)
+MinVersion=10.0
 
 ; สิทธิ์ในการติดตั้ง
 PrivilegesRequired=lowest
@@ -48,9 +48,8 @@ Name: "desktopicon"; Description: "สร้างไอคอนบนหน้
 ; คัดลอกไฟล์โปรแกรมทั้งหมดจากโฟลเดอร์ dist\BatteryRequisition
 Source: "dist\BatteryRequisition\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; ฐานข้อมูลที่ใช้งานจริงอยู่ที่ %LOCALAPPDATA%\BatteryRequisition\data (โปรแกรมสร้างเองตอนเปิดครั้งแรก)
-; ถ้ามีโฟลเดอร์ data ตอน build จะถูกคัดลอกไปเป็นข้อมูลตั้งต้น และโปรแกรมจะย้ายไป %LOCALAPPDATA% ให้ครั้งแรก
-Source: "data\*"; DestDir: "{app}\data"; Flags: onlyifdoesntexist recursesubdirs createallsubdirs skipifsourcedoesntexist
+; ข้อมูลของผู้ใช้ (ฐานข้อมูล PDF ไฟล์สำรอง) อยู่ที่ %LOCALAPPDATA%\BatteryRequisition\ โปรแกรมสร้างเองตอนเปิดครั้งแรก
+; ตัวติดตั้งและตัวถอนการติดตั้งจะไม่แตะต้องโฟลเดอร์นั้น
 
 [Icons]
 Name: "{autoprograms}\ระบบออกใบเบิกแบตเตอรี่\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
