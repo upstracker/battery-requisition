@@ -6,6 +6,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+import app_paths
+
 def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหมด", company_name="บริษัท คลังแบตเตอรี่และบริการ จำกัด", output_path=None):
     """
     ส่งออกรายงานสรุปยอดใบเบิกสินค้าเป็นไฟล์ Excel (.xlsx) สวยงาม
@@ -52,17 +54,17 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
     align_right = Alignment(horizontal="right", vertical="center")
 
     # --- ส่วนหัวเอกสาร ---
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:K1")
     ws["A1"] = company_name
     ws["A1"].font = font_title
     ws["A1"].alignment = align_left
 
-    ws.merge_cells("A2:J2")
+    ws.merge_cells("A2:K2")
     ws["A2"] = f"รายงานสรุปการเบิกจ่ายสินค้าขึ้นรถส่งของ | เงื่อนไข: {filter_desc}"
     ws["A2"].font = font_subtitle
     ws["A2"].alignment = align_left
 
-    ws.merge_cells("A3:J3")
+    ws.merge_cells("A3:K3")
     ws["A3"] = f"พิมพ์รายงานเมื่อ: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} | รวมทั้งหมด: {len(requisitions)} ใบเบิก"
     ws["A3"].font = font_meta
     ws["A3"].alignment = align_left
@@ -79,7 +81,8 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
         "ร้านค้า/ลูกค้า", 
         "สายส่ง/โซน", 
         "บิลอ้างอิง", 
-        "จำนวน (ลูก)", 
+        "แบตเตอรี่ (ลูก)", 
+        "อื่นๆ (รายการ)", 
         "สถานะ"
     ]
     ws.append(headers)
@@ -95,15 +98,18 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
 
     # --- ข้อมูลแถว ---
     total_units_sum = 0
+    total_other_sum = 0
     start_data_row = 6
 
     for idx, r in enumerate(requisitions):
         row_idx = start_data_row + idx
-        units = int(r.get("total_units") or 0)
+        units = int(r.get("battery_units") or 0)
+        others = int(r.get("other_lines") or 0)
         status_raw = r.get("status", "COMPLETED")
         status_text = "จ่ายของแล้ว" if status_raw == "COMPLETED" else "ยกเลิกแล้ว"
         if status_raw == "COMPLETED":
             total_units_sum += units
+            total_other_sum += others
 
         row_data = [
             idx + 1,
@@ -115,6 +121,7 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
             r.get("route_zone", "-"),
             r.get("ref_bill_no", "-"),
             units,
+            others,
             status_text
         ]
         ws.append(row_data)
@@ -127,15 +134,15 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
             cell.border = thin_border
 
             # Alignment
-            if col_idx in (1, 2, 3, 4, 8, 10):
+            if col_idx in (1, 2, 3, 4, 8, 11):
                 cell.alignment = align_center
             elif col_idx in (5, 6, 7):
                 cell.alignment = align_left
-            elif col_idx == 9:
+            elif col_idx in (9, 10):
                 cell.alignment = align_right
 
             # สีสถานะ
-            if col_idx == 10:
+            if col_idx == 11:
                 cell.font = font_completed if status_raw == "COMPLETED" else font_cancelled
 
     # --- แถวสรุปผลรวม (Total Row) ---
@@ -161,9 +168,16 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
     total_units_cell.fill = fill_total
     total_units_cell.border = double_bottom_border
 
+    total_other_cell = ws.cell(row=total_row_idx, column=10)
+    total_other_cell.value = total_other_sum
+    total_other_cell.font = font_total
+    total_other_cell.alignment = align_right
+    total_other_cell.fill = fill_total
+    total_other_cell.border = double_bottom_border
+
     # ช่องสถานะว่าง
-    empty_cell = ws.cell(row=total_row_idx, column=10)
-    empty_cell.value = "ลูก"
+    empty_cell = ws.cell(row=total_row_idx, column=11)
+    empty_cell.value = "ลูก / รายการ"
     empty_cell.font = font_total
     empty_cell.alignment = align_center
     empty_cell.fill = fill_total
@@ -179,8 +193,9 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
         6: 30,  # ลูกค้า/ร้านค้า
         7: 24,  # สายส่ง/โซน
         8: 16,  # บิลอ้างอิง
-        9: 15,  # จำนวน
-        10: 16  # สถานะ
+        9: 15,  # แบตเตอรี่ (ลูก)
+        10: 15, # อื่นๆ (รายการ)
+        11: 16  # สถานะ
     }
     for col_idx, width in col_widths.items():
         col_letter = get_column_letter(col_idx)
@@ -188,8 +203,7 @@ def export_requisitions_to_excel(requisitions, filter_desc="ทั้งหม�
 
     # บันทึกไฟล์
     if not output_path:
-        out_dir = "exported_reports"
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = app_paths.reports_dir()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(out_dir, f"รายงานสรุปการเบิก_{timestamp}.xlsx")
 

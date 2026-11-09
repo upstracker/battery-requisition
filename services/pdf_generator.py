@@ -2,10 +2,14 @@ import os
 import sys
 import subprocess
 from fpdf import FPDF
-from datetime import datetime
 
-FONT_REGULAR = os.path.abspath("assets/fonts/Sarabun-Regular.ttf")
-FONT_BOLD = os.path.abspath("assets/fonts/Sarabun-Bold.ttf")
+import app_paths
+from fpdf.enums import MethodReturnValue
+
+from services.categories import count_breakdown, format_breakdown
+
+SUMMARY_FONT_SIZES = (9, 8.5, 8, 7.5, 7)
+SUMMARY_MAX_LINES = 3  # พื้นที่ว่างท้ายหน้า A5 รองรับได้ประมาณ 3 บรรทัดที่ 7pt
 
 class BatteryRequisitionPDF(FPDF):
     def __init__(self):
@@ -14,8 +18,33 @@ class BatteryRequisitionPDF(FPDF):
         self.set_auto_page_break(auto=False)
         self.set_margins(left=12, top=6, right=12)
         self.set_text_shaping(True)
-        self.add_font("Sarabun", style="", fname=FONT_REGULAR)
-        self.add_font("Sarabun", style="B", fname=FONT_BOLD)
+        self.add_font("Sarabun", style="", fname=app_paths.font_file("Sarabun-Regular.ttf"))
+        self.add_font("Sarabun", style="B", fname=app_paths.font_file("Sarabun-Bold.ttf"))
+
+def _fit_count_summary(pdf, items_data, width):
+    """
+    หาขนาดตัวอักษรและการตัดบรรทัดของแถวสรุปตรวจนับ โดยไม่ตัดรายการใดทิ้ง
+    ลำดับที่เลือก: 1 บรรทัด (ลดตัวอักษรได้ถึง 7pt) -> หลายบรรทัดที่ 7pt -> ย่อชื่อสินค้าที่ยาวมาก
+    """
+    rows = count_breakdown(items_data)
+    prefix = f"สรุปตรวจนับ ({len(items_data)} รายการ):  "
+
+    def wrap(size, max_name_len=None):
+        pdf.set_font("Sarabun", style="B", size=size)
+        text = prefix + (format_breakdown(rows, max_name_len=max_name_len) or "-")
+        return pdf.multi_cell(width, 3.6, text, dry_run=True, output=MethodReturnValue.LINES)
+
+    for size in SUMMARY_FONT_SIZES:
+        lines = wrap(size)
+        if len(lines) == 1:
+            return size, lines
+    smallest = SUMMARY_FONT_SIZES[-1]
+    for max_name_len in (None, 24, 16):
+        lines = wrap(smallest, max_name_len)
+        if len(lines) <= SUMMARY_MAX_LINES:
+            return smallest, lines
+    return smallest, lines
+
 
 def generate_requisition_pdf(req_data, items_data, settings=None, output_path=None):
     """
@@ -35,9 +64,8 @@ def generate_requisition_pdf(req_data, items_data, settings=None, output_path=No
         }
 
     if not output_path:
-        os.makedirs("output_pdfs", exist_ok=True)
         safe_req_no = req_data.get("req_no", "REQ").replace("/", "-")
-        output_path = os.path.join("output_pdfs", f"{safe_req_no}.pdf")
+        output_path = os.path.join(app_paths.pdf_dir(), f"{safe_req_no}.pdf")
 
     pdf = BatteryRequisitionPDF()
     pdf.add_page()
@@ -159,7 +187,6 @@ def generate_requisition_pdf(req_data, items_data, settings=None, output_path=No
     pdf.set_font("Sarabun", style="", size=8)
     pdf.set_text_color(20, 20, 20)
 
-    total_qty = 0
     max_display_rows = 15
     row_count = max_display_rows
     row_height = 3.9
@@ -174,7 +201,6 @@ def generate_requisition_pdf(req_data, items_data, settings=None, output_path=No
         if idx < len(items_data):
             item = items_data[idx]
             qty = int(item.get("quantity", 0))
-            total_qty += qty
             no_text = str(idx + 1)
             name_text = str(item.get("item_name", ""))
             if len(name_text) > 62:
@@ -212,16 +238,15 @@ def generate_requisition_pdf(req_data, items_data, settings=None, output_path=No
         pdf.cell(col_w[6], row_height, remark_text, border="LR", align="C", fill=True)
         pdf.ln()
 
-    # แถวสรุปรวมท้ายตาราง
-    pdf.set_font("Sarabun", style="B", size=9)
+    # แถวสรุปตรวจนับท้ายตาราง: แบตรวมเป็นลูก + สินค้าอื่นแยกตามชื่อและหน่วย
     pdf.set_fill_color(241, 245, 249)
     pdf.set_draw_color(180, 190, 200)
-    merged_w = sum(col_w[:2])
-    pdf.cell(merged_w, 4.8, "รวมจำนวนแบตเตอรี่ทั้งสิ้น (Total Units)", border=1, align="R", fill=True)
-    pdf.cell(col_w[2], 4.8, f"{total_qty:,}", border=1, align="R", fill=True)
-    pdf.cell(col_w[3], 4.8, "ลูก", border=1, align="C", fill=True)
-    pdf.cell(col_w[4] + col_w[5] + col_w[6], 4.8, f"{len(items_data)} รายการ", border=1, align="C", fill=True)
-    pdf.ln(5.6)
+    font_size, summary_lines = _fit_count_summary(pdf, items_data, width=sum(col_w))
+    pdf.set_font("Sarabun", style="B", size=font_size)
+    line_h = 4.8 if len(summary_lines) == 1 else 3.6
+    pdf.multi_cell(sum(col_w), line_h, "\n".join(summary_lines), border=1, align="L", fill=True,
+                   new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(0.8)
 
     # --- กล่องตรวจเช็คความถูกต้องก่อนปล่อยรถ (DISPATCH CHECKLIST BOX) ---
     check_box_y = pdf.get_y()
@@ -323,8 +348,9 @@ def open_pdf_file(pdf_path):
         subprocess.run(["xdg-open", pdf_path], check=False)
 
 if __name__ == "__main__":
+    # รันจากโฟลเดอร์โปรเจกต์ด้วย: python -m services.pdf_generator
     sample_req = {
-        "req_no": "BAT-202609-0001",
+        "req_no": "REQ-202609-0001",
         "req_date": "03/09/2026",
         "driver_name": "นายประเสริฐ ขับดี",
         "vehicle_plate": "1ผข-4512 กทม.",
@@ -337,6 +363,8 @@ if __name__ == "__main__":
         {"brand": "GS", "item_code": "MFX-60L", "item_name": "GS MFX-60L (50B24L) 45Ah กึ่งแห้ง ขั้ว L", "unit": "ลูก", "quantity": 4, "remark": "เก๋งเล็ก"},
         {"brand": "3K", "item_code": "MAX-X 105D31L", "item_name": "3K MAX-X 105D31L 90Ah ขั้ว L ไฮบริด", "unit": "ลูก", "quantity": 6, "remark": "กระบะ"},
         {"brand": "FB", "item_code": "GOLD 55D23L", "item_name": "FB PREMIUM GOLD 55D23L 60Ah แบตแห้ง", "unit": "ลูก", "quantity": 2, "remark": "SMF"},
+        {"brand": "อะไหล่", "category": "อะไหล่", "item_code": "ขั้วแบต", "item_name": "ขั้วแบตทองเหลือง", "unit": "อัน", "quantity": 2, "remark": ""},
+        {"brand": "น้ำกลั่น/เคมี", "category": "น้ำกลั่น/เคมี", "item_code": "น้ำกลั่น", "item_name": "น้ำกลั่น", "unit": "ขวด", "quantity": 3, "remark": ""},
     ]
     path = generate_requisition_pdf(sample_req, sample_items)
     print("Generated:", path)

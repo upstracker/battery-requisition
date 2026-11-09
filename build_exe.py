@@ -29,6 +29,7 @@ def build():
         "--noconsole",
         "--name=ระบบออกใบเบิก",
         f"--add-data=assets{path_sep}assets",
+        f"--add-data=รุ่นแบตเตอรี่.xlsx{path_sep}.",
         "--collect-all=customtkinter",
         "--collect-all=fpdf2",
         "--collect-all=uharfbuzz",

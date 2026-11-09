@@ -1,21 +1,29 @@
 import os
-import shutil
 import sqlite3
 from datetime import datetime
 
+import app_paths
+from services.catalog_rules import UNKNOWN_BRAND, build_base_code, detect_brand, _brand_pattern
+from services.categories import BATTERY, OTHER_CATEGORIES
+from services.dates import normalize_req_date
+
 # เวอร์ชันโครงสร้างฐานข้อมูลล่าสุด
-LATEST_SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 2
 
 
 def snapshot_backup(db_path, reason="pre_migration"):
-    """สร้างไฟล์ Snapshot สำรองฐานข้อมูลแบบเร่งด่วนก่อนการปรับโครงสร้าง"""
+    """สร้างไฟล์ Snapshot สำรองฐานข้อมูลก่อนการปรับโครงสร้าง"""
     if not os.path.exists(db_path):
         return None
-    backup_dir = "database_backups"
-    os.makedirs(backup_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_file = os.path.join(backup_dir, f"snapshot_{reason}_{timestamp}.db")
-    shutil.copy2(db_path, backup_file)
+    backup_file = os.path.join(app_paths.backup_dir(), f"snapshot_{reason}_{timestamp}.db")
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(backup_file)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
     return os.path.abspath(backup_file)
 
 
@@ -95,9 +103,74 @@ def migration_v1(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_req_status ON requisitions (status);")
 
 
+def _has_column(cursor, table, column):
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
+def _fix_misdetected_brands(cursor):
+    """
+    แก้ยี่ห้อที่ตัวนำเข้า Excel รุ่นเก่าเดาผิด (เช่น "GS ... EFB" ถูกนับเป็น FB เพราะมีคำว่า FB ใน EFB)
+    เปลี่ยนเฉพาะเมื่อยี่ห้อเดิมไม่ได้ปรากฏเป็นคำเดี่ยวในชื่อสินค้าเลย
+    """
+    cursor.execute("SELECT id, brand, item_code, item_name FROM items")
+    rows = cursor.fetchall()
+    codes = {row[2] for row in rows}
+    for item_id, brand, code, name in rows:
+        new_brand = detect_brand(name)
+        if new_brand in (UNKNOWN_BRAND, brand) or not brand:
+            continue
+        if _brand_pattern(brand.upper()).search(str(name).upper()):
+            continue
+        new_code = code
+        if code == build_base_code(name, brand):
+            candidate = build_base_code(name, new_brand)
+            if candidate not in codes:
+                new_code = candidate
+        codes.discard(code)
+        codes.add(new_code)
+        cursor.execute(
+            "UPDATE items SET brand = ?, item_code = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (new_brand, new_code, item_id),
+        )
+
+
+def _normalize_stored_dates(cursor):
+    cursor.execute("SELECT id, req_date FROM requisitions")
+    for req_id, req_date in cursor.fetchall():
+        try:
+            normalized = normalize_req_date(req_date)
+        except ValueError:
+            continue
+        if normalized != req_date:
+            cursor.execute("UPDATE requisitions SET req_date = ? WHERE id = ?", (normalized, req_id))
+
+
+def migration_v2(cursor):
+    """
+    Migration Version 2:
+    - เพิ่มช่อง category (หมวดสินค้า) ให้ items และ requisition_items แยกจากยี่ห้อ
+    - จัดหมวดรายการเก่าที่เป็นอะไหล่/สินค้าอื่น (เดิมเก็บหมวดไว้ในช่องยี่ห้อ)
+    - แก้ยี่ห้อแบตที่นำเข้าผิด และปรับรูปแบบวันที่ใบเบิกให้เป็น DD/MM/YYYY (ค.ศ.)
+    """
+    for table in ("items", "requisition_items"):
+        if not _has_column(cursor, table, "category"):
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN category TEXT NOT NULL DEFAULT '{BATTERY}'")
+
+    placeholders = ",".join("?" for _ in OTHER_CATEGORIES)
+    cursor.execute(f"""
+        UPDATE requisition_items SET category = brand
+        WHERE item_id IS NULL AND brand IN ({placeholders}) AND item_name NOT LIKE ?
+    """, (*OTHER_CATEGORIES, f"{BATTERY}%"))
+
+    _fix_misdetected_brands(cursor)
+    _normalize_stored_dates(cursor)
+
+
 # ทะเบียนบันทึกฟังก์ชัน Migration ตามเวอร์ชัน
 MIGRATIONS = {
     1: migration_v1,
+    2: migration_v2,
 }
 
 

@@ -6,29 +6,13 @@ import re
 import sqlite3
 import openpyxl
 
-EXCEL_FILE = "รุ่นแบตเตอรี่.xlsx"
-DB_FILE = "inventory.db"
+import app_paths
+from services.catalog_rules import build_base_code, detect_brand
 
-BRANDS = [
-    'GLOBAL POWER', 'SCHAEFFLER', 'POWERZONE', 'AMARON', 'BOLIDEN', 
-    'PINACO', 'SOLITE', 'BOSCH', 'VARTA', 'YUASA', 'NIKO', 'ULTRA', 
-    'ROCKET', 'PUMA', 'LONG', 'BMF', 'ESB', 'FB', 'GS', 'RR'
-]
 
-def clean_model_code(raw, brand):
-    # ตัดคำว่า แบตเตอรี่, ยี่ห้อ, รุ่น ออก
-    text = raw
-    text = re.sub(r'^(?:BATTERY|แบตเตอรี่|ยี่ห้อ)\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'(?i)\b' + re.escape(brand) + r'\b', '', text).strip()
-    text = re.sub(r'^(?:รุ่น|แบบ)\s*', '', text, flags=re.IGNORECASE).strip()
-
-    # ตัดช่องว่างซ้ำซ้อน
-    text = re.sub(r'\s+', ' ', text).strip(' -_/')
-    if not text:
-        text = raw[:30]
-    return text
-
-def import_batteries(excel_path=EXCEL_FILE, db_path=DB_FILE, default_qty=10):
+def import_batteries(excel_path=None, db_path=None, default_qty=10):
+    excel_path = excel_path or app_paths.battery_excel_file()
+    db_path = db_path or app_paths.db_file()
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"ไม่พบไฟล์ Excel: {excel_path}")
 
@@ -41,27 +25,19 @@ def import_batteries(excel_path=EXCEL_FILE, db_path=DB_FILE, default_qty=10):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # กันรหัสซ้ำเฉพาะภายในไฟล์ Excel รอบนี้ ส่วนรหัสที่มีใน DB แล้วจะถูกอัปเดตด้วย ON CONFLICT
+    # (นำเข้าซ้ำจะไม่สร้างรายการซ้ำแบบ "(#1)")
     seen_codes = set()
-    # ดึง code ที่มีอยู่แล้วใน DB เพื่อไม่ให้ชนกัน
-    cursor.execute("SELECT item_code FROM items")
-    for row in cursor.fetchall():
-        seen_codes.add(row[0])
 
     imported_count = 0
-    updated_count = 0
 
     for idx, raw in enumerate(rows):
         # ข้ามยี่ห้อ 3K ตามที่ผู้ใช้กำหนด
         if re.search(r'(?i)\b3K\b', raw):
             continue
 
-        # 1. ตรวจหายี่ห้อ
-        brand = 'ทั่วไป'
-        for b in BRANDS:
-            pattern = r'(?i)(?:^|[\s_/\-(])' + re.escape(b) + r'(?:$|[\s_/\-)])'
-            if re.search(pattern, raw) or b in raw.upper():
-                brand = b
-                break
+        # 1. ตรวจหายี่ห้อ (ต้องเป็นคำเดี่ยว: EFB ไม่ใช่ FB)
+        brand = detect_brand(raw)
 
         # 2. ตรวจหาความจุ Ah
         ah_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:Ah|AH|A\b)', raw)
@@ -87,11 +63,7 @@ def import_batteries(excel_path=EXCEL_FILE, db_path=DB_FILE, default_qty=10):
             b_type = 'กึ่งแห้ง (MF)'
 
         # 4. สร้างรหัสรุ่น (item_code)
-        m_code = clean_model_code(raw, brand)
-        if len(m_code) > 40:
-            m_code = m_code[:38] + ".."
-
-        base_code = f"{brand} {m_code}".strip() if not m_code.upper().startswith(brand) else m_code
+        base_code = build_base_code(raw, brand)
         final_code = base_code
         counter = 1
         while final_code in seen_codes:
@@ -125,4 +97,9 @@ def import_batteries(excel_path=EXCEL_FILE, db_path=DB_FILE, default_qty=10):
     return imported_count, total_items
 
 if __name__ == "__main__":
+    from database.db import ensure_data_directory, get_db_file
+    from database.migrations import run_migrations
+
+    ensure_data_directory()
+    run_migrations(get_db_file())
     import_batteries()

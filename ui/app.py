@@ -6,6 +6,7 @@ import customtkinter as ctk
 from datetime import datetime, timedelta
 from PIL import Image, ImageTk
 
+import app_paths
 from database.db import init_db, generate_next_req_no
 from services import inventory_service as inv_service
 from services import pdf_generator as pdf_gen
@@ -13,8 +14,24 @@ from services import report_export as report_exporter
 from services.battery_search import (
     find_inventory_matches,
     parse_battery_quick_entry,
+    pick_direct_match,
     prepare_inventory_items_for_search
 )
+from services.categories import (
+    BATTERY,
+    OTHER_CATEGORIES,
+    count_breakdown,
+    format_breakdown,
+    format_totals,
+    is_battery,
+    item_category,
+)
+from services.catalog_rules import detect_brand
+from services.dates import normalize_req_date
+
+HISTORY_DISPLAY_LIMIT = 500
+BATTERY_TYPES = ["ไม่ระบุ", "กึ่งแห้ง (MF)", "แห้ง (SMF)", "EFB", "AGM", "น้ำ (Conventional)", "ไฮบริด"]
+UNIT_CHOICES = ["ลูก", "ตัว", "อัน", "ชิ้น", "ตลับ", "ชุด", "กล่อง", "ขวด", "แกลลอน", "ลัง"]
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -36,13 +53,17 @@ class BatteryRequisitionApp(ctk.CTk):
         self.all_inventory_items = []
         self.cart_qty_entries = []
         self.cart_rem_entries = []
+        self.cart_name_entries = []
+        self.current_matches = []
+        self.current_scored_matches = []
+        self.match_selection_moved = False
+        self.matches_query = None
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         # โหลดภาพไอคอนแบตเตอรี่รถยนต์ (12V Car Battery Icon)
-        asset_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
-        car_battery_icon_path = os.path.join(asset_dir, "car_battery.png")
+        car_battery_icon_path = app_paths.asset_file("car_battery.png")
         self.img_car_battery_logo = None
         self.img_car_battery_btn = None
         if os.path.exists(car_battery_icon_path):
@@ -219,7 +240,7 @@ class BatteryRequisitionApp(ctk.CTk):
         self.edit_banner_frame = ctk.CTkFrame(view, fg_color=("#fef3c7", "#78350f"), corner_radius=8)
         self.lbl_edit_banner = ctk.CTkLabel(
             self.edit_banner_frame, 
-            text="🔧 โหมดแก้ไขใบเบิก: BAT-XXXXXX", 
+            text="🔧 โหมดแก้ไขใบเบิก: REQ-XXXXXX", 
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=("#92400e", "#fde68a")
         )
@@ -298,14 +319,21 @@ class BatteryRequisitionApp(ctk.CTk):
         sec2_header = ctk.CTkFrame(left_panel, fg_color="transparent")
         sec2_header.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(2, 2))
         ctk.CTkLabel(sec2_header, text="⚡ 2. ค้นหาและเลือกรุ่นแบตเตอรี่", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        self.btn_new_battery = ctk.CTkButton(
+            sec2_header, text="➕ เพิ่มแบตรุ่นใหม่",
+            fg_color="#0e7490", hover_color="#155e75",
+            height=28, width=120, font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self.open_new_battery_dialog(),
+        )
+        self.btn_new_battery.pack(side="right")
         self.lbl_match_count = ctk.CTkLabel(sec2_header, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color="#0e7490")
-        self.lbl_match_count.pack(side="right")
+        self.lbl_match_count.pack(side="right", padx=(6, 8))
 
         # ปุ่มลัดยี่ห้อยอดนิยม (Quick Brand Chips)
         brand_chips_frame = ctk.CTkScrollableFrame(left_panel, height=36, orientation="horizontal", fg_color="transparent")
         brand_chips_frame.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 2))
         
-        top_brands = ["ทั้งหมด", "FB", "GS", "YUASA", "BOLIDEN", "AMARON", "SOLITE", "ESB", "VARTA", "NIKO", "BOSCH"]
+        top_brands = ["ทั้งหมด", "FB", "GS", "YUASA", "BOLIDEN", "AMARON", "SOLITE", "ESB", "VARTA", "SCHAEFFLER", "NIKO", "BOSCH"]
         self.brand_chip_buttons = {}
         self.selected_brand_chip = "ทั้งหมด"
         for b in top_brands:
@@ -369,6 +397,7 @@ class BatteryRequisitionApp(ctk.CTk):
 
         # ดับเบิ้ลคลิก (Double Click) หรือกด Enter เพื่อเพิ่มลงใบเบิก (คลิก 1 ครั้งจะเป็นการเลือกแถวตามปกติ)
         self.matches_tree.bind("<Double-1>", self.on_match_row_double_click)
+        self.matches_tree.bind("<ButtonRelease-1>", self.on_match_row_click)
         self.matches_tree.bind("<Return>", lambda e: self.add_selected_match_to_cart(clear_search=True))
 
         # แถบควบคุมด้านล่างตาราง: จำนวน + หมายเหตุ + ปุ่มเพิ่ม
@@ -380,19 +409,19 @@ class BatteryRequisitionApp(ctk.CTk):
         self.entry_qty = ctk.CTkEntry(action_bar, width=50, height=32, justify="center", font=ctk.CTkFont(size=13, weight="bold"))
         self.entry_qty.insert(0, "1")
         self.entry_qty.grid(row=0, column=1, sticky="w", padx=(0, 2))
-        self.entry_qty.bind("<Return>", lambda e: self.add_selected_match_to_cart())
+        self.entry_qty.bind("<Return>", self.add_from_search)
 
         ctk.CTkLabel(action_bar, text="ลูก", font=ctk.CTkFont(size=12)).grid(row=0, column=2, sticky="w", padx=(0, 8))
 
         self.entry_item_remark = ctk.CTkEntry(action_bar, height=32, placeholder_text="หมายเหตุ เช่น เทิร์น, ขั้ว L...")
         self.entry_item_remark.grid(row=0, column=3, sticky="ew", padx=(0, 8))
-        self.entry_item_remark.bind("<Return>", lambda e: self.add_selected_match_to_cart())
+        self.entry_item_remark.bind("<Return>", self.add_from_search)
 
         btn_add_match = ctk.CTkButton(
-            action_bar, text="➕ เพิ่มแบตเตอรี่ (Enter)",
+            action_bar, text="➕ เพิ่มลงบิล (Enter)",
             fg_color="#15803d", hover_color="#166534",
             height=32, width=140, font=ctk.CTkFont(weight="bold"),
-            command=self.add_selected_match_to_cart
+            command=self.add_from_search
         )
         btn_add_match.grid(row=0, column=4, sticky="e")
 
@@ -400,6 +429,7 @@ class BatteryRequisitionApp(ctk.CTk):
             action_bar, text="📦 ➕ เพิ่มอะไหล่อื่น",
             fg_color="#ea580c", hover_color="#c2410c",
             height=32, width=130, font=ctk.CTkFont(weight="bold"),
+            command=lambda: self.open_custom_item_dialog(),
         )
         btn_add_custom.grid(row=0, column=5, sticky="e", padx=(6, 0))
         self.lbl_quick_toast = ctk.CTkLabel(left_panel, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color="#15803d")
@@ -412,19 +442,28 @@ class BatteryRequisitionApp(ctk.CTk):
         right_panel.grid_columnconfigure(0, weight=1)
 
         header_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
+        header_frame.grid(row=0, column=0, padx=14, pady=(12, 0), sticky="ew")
+        header_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            header_frame, 
-            text="📋 รายการแบตเตอรี่จัดขึ้นรถ", 
+            header_frame,
+            text="📋 รายการแบตเตอรี่จัดขึ้นรถ",
             font=ctk.CTkFont(size=18, weight="bold")
         ).grid(row=0, column=0, sticky="w")
 
+        # ยอดสำหรับตรวจนับ: แบตรวมเป็นลูก + สินค้าอื่นแยกตามชื่อ (ข้อความยาวจะขึ้นบรรทัดใหม่)
         self.lbl_cart_summary = ctk.CTkLabel(
-            header_frame, 
-            text="รวม: 0 รายการ (0 ลูก)", 
+            header_frame,
+            text="ยังไม่มีรายการ",
             font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#0e7490"
+            text_color="#0e7490",
+            justify="left",
+            anchor="w",
         )
-        self.lbl_cart_summary.grid(row=0, column=1, sticky="e")
+        self.lbl_cart_summary.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        header_frame.bind(
+            "<Configure>",
+            lambda e: self.lbl_cart_summary.configure(wraplength=max(e.width - 10, 200)),
+        )
 
         self.cart_frame = ctk.CTkScrollableFrame(right_panel, corner_radius=8)
         self.cart_frame.grid(row=1, column=0, padx=14, pady=6, sticky="nsew")
@@ -467,6 +506,10 @@ class BatteryRequisitionApp(ctk.CTk):
             self.entry_req_no.delete(0, "end")
             self.entry_req_no.insert(0, generate_next_req_no())
 
+        self.refresh_inventory_cache()
+
+    def refresh_inventory_cache(self):
+        """โหลดข้อมูลรุ่นใหม่จากฐานข้อมูล (หลังเพิ่ม/แก้ไข/ลบรุ่น)"""
         self.all_inventory_items = prepare_inventory_items_for_search(inv_service.get_all_items())
         self.refresh_live_matches()
 
@@ -481,10 +524,13 @@ class BatteryRequisitionApp(ctk.CTk):
 
         # 2. ค้นหาตาม search_kw
         if search_kw:
-            scored = find_inventory_matches(items_pool, search_kw)
-            self.current_matches = [it for _, it in scored]
+            self.current_scored_matches = find_inventory_matches(items_pool, search_kw)
+            self.current_matches = [it for _, it in self.current_scored_matches]
         else:
+            self.current_scored_matches = []
             self.current_matches = items_pool
+        self.match_selection_moved = False
+        self.matches_query = raw_text
 
         # 3. อัปเดตตาราง
         if hasattr(self, "matches_tree"):
@@ -508,7 +554,7 @@ class BatteryRequisitionApp(ctk.CTk):
                 self.matches_tree.focus(children[0])
                 self.lbl_match_count.configure(text=f"พบ {len(self.current_matches)} รุ่น", text_color="#0e7490")
             else:
-                self.lbl_match_count.configure(text="ไม่พบรุ่นที่ค้นหา", text_color="#dc2626")
+                self.lbl_match_count.configure(text="ไม่พบ • กด Enter เพิ่มรุ่นใหม่", text_color="#dc2626")
 
     def on_live_search_key(self, event=None):
         if event and event.keysym in ("Up", "Down", "Return", "Escape"):
@@ -519,6 +565,7 @@ class BatteryRequisitionApp(ctk.CTk):
         children = self.matches_tree.get_children()
         if not children:
             return "break"
+        self.match_selection_moved = True
         selected = self.matches_tree.selection()
         if not selected:
             self.matches_tree.selection_set(children[0])
@@ -536,6 +583,7 @@ class BatteryRequisitionApp(ctk.CTk):
         children = self.matches_tree.get_children()
         if not children:
             return "break"
+        self.match_selection_moved = True
         selected = self.matches_tree.selection()
         if not selected:
             self.matches_tree.selection_set(children[0])
@@ -550,26 +598,135 @@ class BatteryRequisitionApp(ctk.CTk):
         return "break"
 
     def on_live_search_enter(self, event=None):
+        """Enter ในช่องค้นหา: ดึงจำนวน/หมายเหตุจากรูปแบบคีย์ด่วน (เช่น N100*2*เทิร์น) แล้วเพิ่มตามกฎกลาง"""
         raw_text = self.entry_battery_search.get().strip()
         if not raw_text:
             return "break"
-        search_kw, qty_spec, remark_spec = parse_battery_quick_entry(raw_text)
+        _, qty_spec, remark_spec = parse_battery_quick_entry(raw_text)
         if qty_spec is not None:
             self.entry_qty.delete(0, "end")
             self.entry_qty.insert(0, str(qty_spec))
         if remark_spec:
             self.entry_item_remark.delete(0, "end")
             self.entry_item_remark.insert(0, remark_spec)
-
-        success = self.add_selected_match_to_cart(clear_search=True)
-        if not success:
-            # ถ้าไม่พบในสต็อกแบตเตอรี่ เปิดกล่องเพิ่มอะไหล่/สินค้าอื่นให้อัตโนมัติ
-            self.open_custom_item_dialog(
-                prefill_name=search_kw, 
-                prefill_qty=qty_spec, 
-                prefill_remark=remark_spec
-            )
+        self.add_from_search()
         return "break"
+
+    def add_from_search(self, event=None):
+        """
+        กฎกลางสำหรับเพิ่มรุ่นจากตารางค้นหา ใช้ร่วมกันทั้ง Enter ในช่องค้นหา/จำนวน/หมายเหตุ และปุ่ม "เพิ่มลงบิล"
+        - ผู้ใช้เลือกแถวเองแล้ว (▲/▼ หรือคลิกแถว) -> เพิ่มแถวนั้น
+        - รหัสตรงรุ่นเดียว หรือเจอรุ่นเดียว -> เพิ่มทันที
+        - เจอหลายรุ่น -> เปิดหน้าต่างให้เลือก
+        - ไม่พบ -> เปิดหน้าต่างเพิ่มแบตเตอรี่รุ่นใหม่
+        """
+        raw_text = self.entry_battery_search.get().strip()
+        if raw_text != self.matches_query:
+            # ข้อความเปลี่ยนโดยไม่มีการกดแป้น (เช่น คลิกขวาวาง) -> คำนวณผลค้นหาใหม่ก่อน
+            self.refresh_live_matches()
+        search_kw = parse_battery_quick_entry(raw_text)[0]
+
+        if self.match_selection_moved and self.matches_tree.selection():
+            self.add_selected_match_to_cart(clear_search=True)
+            return "break"
+
+        if not search_kw:
+            self.show_quick_toast("⚠️ พิมพ์รุ่นที่ต้องการ หรือคลิกเลือกแถวในตารางก่อน", color="#d97706")
+            self.entry_battery_search.focus()
+            return "break"
+
+        if not self.current_matches:
+            qty_text = self.entry_qty.get().strip()
+            self.open_new_battery_dialog(
+                prefill_text=search_kw,
+                prefill_qty=int(qty_text) if qty_text.isdigit() else None,
+                prefill_remark=self.entry_item_remark.get().strip(),
+            )
+            return "break"
+
+        direct = pick_direct_match(self.current_scored_matches, search_kw)
+        if direct is not None:
+            self.add_item_to_cart(direct, clear_search=True)
+        else:
+            self.open_match_picker(search_kw)
+        return "break"
+
+    def on_match_row_click(self, event):
+        if self.matches_tree.identify_row(event.y):
+            self.match_selection_moved = True
+
+    def open_match_picker(self, search_kw):
+        """เจอหลายรุ่นที่ใกล้เคียงกัน: ให้เลือกรุ่นที่ถูกต้องก่อนเพิ่มลงบิล"""
+        matches = self.current_matches[:100]
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("เลือกรุ่นแบตเตอรี่")
+        dialog.geometry("620x380")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text=f"พบ {len(self.current_matches)} รุ่นที่ตรงกับ '{search_kw}' กรุณาเลือกรุ่นที่ถูกต้อง",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(padx=16, pady=(14, 2), anchor="w")
+        ctk.CTkLabel(
+            dialog,
+            text="▲/▼ เลือก • Enter หรือดับเบิลคลิกเพื่อเพิ่ม • Esc ยกเลิก",
+            font=ctk.CTkFont(size=12), text_color="gray",
+        ).pack(padx=16, pady=(0, 8), anchor="w")
+
+        frame = ctk.CTkFrame(dialog, corner_radius=6)
+        frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(frame, columns=("brand", "code", "capacity"), show="headings", selectmode="browse")
+        tree.heading("brand", text="ยี่ห้อ")
+        tree.heading("code", text="รหัส / รุ่น")
+        tree.heading("capacity", text="ความจุ")
+        tree.column("brand", width=90, anchor="center", stretch=False)
+        tree.column("code", width=380, anchor="w")
+        tree.column("capacity", width=80, anchor="center", stretch=False)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.grid(row=0, column=0, sticky="nsew", padx=(2, 0), pady=2)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+
+        by_iid = {}
+        for it in matches:
+            iid = str(it["id"])
+            by_iid[iid] = it
+            tree.insert("", "end", iid=iid, values=(it.get("brand", "-"), it.get("item_code", "-"), it.get("capacity", "-")))
+        children = tree.get_children()
+        if children:
+            tree.selection_set(children[0])
+            tree.focus(children[0])
+
+        def choose(event=None):
+            sel = tree.selection()
+            if not sel:
+                return "break"
+            item = by_iid[sel[0]]
+            dialog.destroy()
+            self.add_item_to_cart(item, clear_search=True)
+            return "break"
+
+        def cancel(event=None):
+            dialog.destroy()
+            self.entry_battery_search.focus()
+            return "break"
+
+        btn_box = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_box.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(btn_box, text="ยกเลิก", fg_color="#64748b", hover_color="#475569", width=90, command=cancel).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_box, text="➕ เพิ่มรุ่นที่เลือก", fg_color="#15803d", hover_color="#166534", width=140, command=choose).pack(side="right")
+
+        tree.bind("<Double-1>", choose)
+        dialog.bind("<Return>", choose)
+        dialog.bind("<Escape>", cancel)
+        dialog.after(100, tree.focus_set)
+        self.match_picker_dialog = dialog
+        return dialog
 
     def on_match_row_double_click(self, event):
         region = self.matches_tree.identify_region(event.x, event.y)
@@ -615,20 +772,25 @@ class BatteryRequisitionApp(ctk.CTk):
         selected_item = next((it for it in self.all_inventory_items if it["id"] == item_id), None)
         if not selected_item:
             return False
+        return self.add_item_to_cart(selected_item, clear_search=clear_search)
 
-        qty_str = self.entry_qty.get().strip()
-        if not qty_str.isdigit() or int(qty_str) <= 0:
-            messagebox.showwarning("แจ้งเตือน", "กรุณาระบุจำนวนลูกให้ถูกต้อง")
-            self.entry_qty.focus()
-            self.entry_qty.select_range(0, "end")
-            return False
-        qty = int(qty_str)
+    def add_item_to_cart(self, selected_item, clear_search=True, qty=None, remark=None):
+        """
+        เพิ่มรุ่นจากข้อมูลรุ่นลงใบเบิก
+        ถ้าไม่ส่ง qty/remark มา จะใช้ค่าจากช่องจำนวนและหมายเหตุใต้ตารางค้นหา
+        """
+        if qty is None:
+            qty_str = self.entry_qty.get().strip()
+            if not qty_str.isdigit() or int(qty_str) <= 0:
+                messagebox.showwarning("แจ้งเตือน", "กรุณาระบุจำนวนลูกให้ถูกต้อง")
+                self.entry_qty.focus()
+                self.entry_qty.select_range(0, "end")
+                return False
+            qty = int(qty_str)
 
-        existing_item = next((c for c in self.cart_items if c["item_id"] == selected_item["id"]), None)
-        already_in_cart = existing_item["quantity"] if existing_item else 0
-        total_requested = already_in_cart + qty
+        existing_item = next((c for c in self.cart_items if c.get("item_id") == selected_item["id"]), None)
 
-        remark_val = self.entry_item_remark.get().strip()
+        remark_val = self.entry_item_remark.get().strip() if remark is None else remark
         if existing_item:
             existing_item["quantity"] += qty
             if remark_val:
@@ -637,14 +799,15 @@ class BatteryRequisitionApp(ctk.CTk):
             raw_name = (selected_item.get("item_name") or "").strip()
             code = (selected_item.get("item_code") or "").strip()
             brand = (selected_item.get("brand") or "").strip()
+            category = selected_item.get("category") or BATTERY
 
             # ตัดความซ้ำซ้อน ให้เหลือแค่: แบตเตอรี่ [ยี่ห้อ] [รุ่น]
             if raw_name:
                 display_name = raw_name
-                if not display_name.startswith("แบตเตอรี่") and brand not in ("อะไหล่", "ทั่วไป", "อุปกรณ์เสริม"):
-                    display_name = f"แบตเตอรี่ {display_name}"
+                if category == BATTERY and not display_name.startswith(BATTERY):
+                    display_name = f"{BATTERY} {display_name}"
             else:
-                display_name = f"แบตเตอรี่ {brand} {code}".strip()
+                display_name = f"{BATTERY} {brand} {code}".strip()
             display_name = re.sub(r"\s+", " ", display_name).strip()
 
             self.cart_items.append({
@@ -652,10 +815,11 @@ class BatteryRequisitionApp(ctk.CTk):
                 "brand": selected_item["brand"],
                 "item_code": selected_item["item_code"],
                 "item_name": display_name,
-                "capacity": selected_item.get("capacity", "-"),
-                "unit": selected_item.get("unit", "ลูก"),
+                "capacity": selected_item.get("capacity") or "-",
+                "unit": selected_item.get("unit") or "ลูก",
                 "quantity": qty,
-                "remark": remark_val
+                "remark": remark_val,
+                "category": category,
             })
 
         self.entry_qty.delete(0, "end")
@@ -703,12 +867,12 @@ class BatteryRequisitionApp(ctk.CTk):
         if not self.cart_items:
             lbl_empty = ctk.CTkLabel(
                 self.cart_frame, 
-                text="ยังไม่มีรายการแบตเตอรี่\nกรุณาเลือกรุ่นแบตจากแผงด้านซ้ายแล้วกด 'เพิ่มแบตเตอรี่ลงในใบเบิก'", 
+                text="ยังไม่มีรายการแบตเตอรี่\nกรุณาค้นหารุ่นแบตจากแผงด้านซ้ายแล้วกด Enter หรือปุ่ม 'เพิ่มลงบิล'", 
                 text_color="gray",
                 pady=40
             )
             lbl_empty.pack()
-            self.lbl_cart_summary.configure(text="รวม: 0 รายการ (0 ลูก)")
+            self.update_cart_summary()
             return
 
         for idx, item in enumerate(self.cart_items):
@@ -723,7 +887,7 @@ class BatteryRequisitionApp(ctk.CTk):
 
             badge = ctk.CTkLabel(
                 top_frame, 
-                text=f"{idx+1}. [{item['brand']}]", 
+                text=f"{idx+1}. [{item['brand'] if is_battery(item) else item_category(item)}]", 
                 font=ctk.CTkFont(weight="bold", size=15),
                 anchor="w"
             )
@@ -933,38 +1097,243 @@ class BatteryRequisitionApp(ctk.CTk):
             self.cart_rem_entries[current_idx].select_range(0, "end")
         return "break"
 
-    def open_custom_item_dialog(self, prefill_name="", prefill_qty=None, prefill_remark=""):
-        if not prefill_name and hasattr(self, "entry_battery_search"):
+    def _prefill_from_search(self, prefill_text, prefill_qty, prefill_remark):
+        """ใช้ข้อความในช่องค้นหา (เช่น "FB N999*2*เทิร์น") เป็นค่าเริ่มต้นของหน้าต่างเพิ่มสินค้า"""
+        if not prefill_text and hasattr(self, "entry_battery_search"):
             raw = self.entry_battery_search.get().strip()
             if raw:
                 kw, q, rem = parse_battery_quick_entry(raw)
-                prefill_name = kw
-                if q is not None:
+                prefill_text = kw
+                if q is not None and prefill_qty is None:
                     prefill_qty = q
-                if rem:
+                if rem and not prefill_remark:
                     prefill_remark = rem
+        return prefill_text or "", prefill_qty, prefill_remark or ""
+
+    def _known_brands(self):
+        return sorted({(it.get("brand") or "").strip().upper() for it in self.all_inventory_items if it.get("brand")})
+
+    def _split_brand_prefix(self, text):
+        """แยกยี่ห้อที่พิมพ์มาข้างหน้า เช่น "FB N999" -> ("FB", "N999")"""
+        parts = (text or "").strip().split(" ", 1)
+        if len(parts) == 2:
+            word = parts[0].upper()
+            if word in self._known_brands() or detect_brand(word) == word:
+                return word, parts[1].strip()
+        return "", (text or "").strip()
+
+    def _center_dialog(self, dialog, width, height):
+        dialog.geometry(f"{width}x{height}")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - width) // 2
+        y = self.winfo_y() + (self.winfo_height() - height) // 2
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def open_new_battery_dialog(self, prefill_text="", prefill_qty=None, prefill_remark="", for_requisition=True):
+        """
+        เพิ่มแบตเตอรี่รุ่นใหม่เข้าข้อมูลรุ่น ใช้ทั้งในหน้าออกใบเบิก (เพิ่มลงบิลได้ทันที)
+        และหน้าข้อมูลรุ่นแบตเตอรี่ (for_requisition=False)
+        """
+        if for_requisition:
+            prefill_text, prefill_qty, prefill_remark = self._prefill_from_search(prefill_text, prefill_qty, prefill_remark)
+        prefill_brand, prefill_model = self._split_brand_prefix(prefill_text)
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("🔋 เพิ่มแบตเตอรี่รุ่นใหม่")
+        self._center_dialog(dialog, 540, 560 if for_requisition else 400)
+
+        ctk.CTkLabel(dialog, text="🔋 เพิ่มแบตเตอรี่รุ่นใหม่", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            padx=20, pady=(16, 2), anchor="w"
+        )
+        ctk.CTkLabel(
+            dialog,
+            text="รุ่นจะถูกบันทึกในข้อมูลรุ่นแบตเตอรี่ ครั้งหน้าค้นหาเจอทันที",
+            font=ctk.CTkFont(size=12), text_color="gray",
+        ).pack(padx=20, pady=(0, 10), anchor="w")
+
+        form = ctk.CTkFrame(dialog, fg_color="transparent")
+        form.pack(fill="x", padx=20, pady=4)
+        form.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="ยี่ห้อ:*", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=6)
+        combo_brand = ctk.CTkComboBox(form, values=self._known_brands() or [""])
+        combo_brand.set(prefill_brand)
+        combo_brand.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+        ctk.CTkLabel(form, text="รุ่น:*", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, sticky="w", pady=6)
+        entry_model = ctk.CTkEntry(form, placeholder_text="เช่น 55D23L, N100, DIN75")
+        if prefill_model:
+            entry_model.insert(0, prefill_model)
+        entry_model.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+        ctk.CTkLabel(form, text="ความจุ:").grid(row=2, column=0, sticky="w", pady=6)
+        entry_cap = ctk.CTkEntry(form, placeholder_text="เช่น 45 Ah (ไม่ระบุก็ได้)")
+        entry_cap.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+        ctk.CTkLabel(form, text="ประเภท:").grid(row=3, column=0, sticky="w", pady=6)
+        combo_type = ctk.CTkComboBox(form, values=BATTERY_TYPES, state="readonly")
+        combo_type.set(BATTERY_TYPES[0])
+        combo_type.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+        lbl_preview = ctk.CTkLabel(form, text="", text_color="#0e7490", font=ctk.CTkFont(size=12, weight="bold"))
+        lbl_preview.grid(row=4, column=0, columnspan=2, sticky="w", pady=(2, 6))
+
+        def compose_code():
+            brand = combo_brand.get().strip().upper()
+            model = " ".join(entry_model.get().split())
+            if not brand or not model:
+                return brand, model, ""
+            code = model if model.upper().startswith(brand) else f"{brand} {model}"
+            return brand, model, code
+
+        def update_preview(*_):
+            _, _, code = compose_code()
+            lbl_preview.configure(text=f"ชื่อที่จะบันทึก: {BATTERY} {code}" if code else "")
+
+        entry_model.bind("<KeyRelease>", update_preview)
+        combo_brand.bind("<KeyRelease>", update_preview)
+        combo_brand.configure(command=update_preview)
+        update_preview()
+
+        var_add_to_bill = tk.BooleanVar(value=for_requisition)
+        entry_qty = entry_rem = None
+        if for_requisition:
+            chk = ctk.CTkCheckBox(form, text="เพิ่มลงใบเบิกนี้ด้วย", variable=var_add_to_bill)
+            chk.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 4))
+
+            ctk.CTkLabel(form, text="จำนวน (ลูก):").grid(row=6, column=0, sticky="w", pady=6)
+            entry_qty = ctk.CTkEntry(form, width=80, justify="center", font=ctk.CTkFont(size=14, weight="bold"))
+            entry_qty.insert(0, str(prefill_qty if prefill_qty is not None else 1))
+            entry_qty.grid(row=6, column=1, sticky="w", padx=(10, 0), pady=6)
+
+            ctk.CTkLabel(form, text="หมายเหตุ:").grid(row=7, column=0, sticky="w", pady=6)
+            entry_rem = ctk.CTkEntry(form, placeholder_text="เช่น เทิร์นลูกเก่า, ขั้ว L...")
+            if prefill_remark:
+                entry_rem.insert(0, prefill_remark)
+            entry_rem.grid(row=7, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+            def toggle_bill_fields():
+                state = "normal" if var_add_to_bill.get() else "disabled"
+                entry_qty.configure(state=state)
+                entry_rem.configure(state=state)
+
+            chk.configure(command=toggle_bill_fields)
+
+        def save():
+            brand, model, code = compose_code()
+            if not brand:
+                messagebox.showwarning("แจ้งเตือน", "กรุณาระบุยี่ห้อแบตเตอรี่", parent=dialog)
+                combo_brand.focus()
+                return
+            if not model:
+                messagebox.showwarning("แจ้งเตือน", "กรุณาระบุรุ่นแบตเตอรี่", parent=dialog)
+                entry_model.focus()
+                return
+
+            add_to_bill = for_requisition and var_add_to_bill.get()
+            qty = None
+            remark = ""
+            if add_to_bill:
+                qty_str = entry_qty.get().strip()
+                if not qty_str.isdigit() or int(qty_str) <= 0:
+                    messagebox.showwarning("แจ้งเตือน", "กรุณาระบุจำนวนลูกให้ถูกต้อง", parent=dialog)
+                    entry_qty.focus()
+                    return
+                qty = int(qty_str)
+                remark = entry_rem.get().strip()
+
+            existing = inv_service.get_item_by_code(code)
+            if existing and not for_requisition:
+                messagebox.showwarning("แจ้งเตือน", f"รหัสรุ่น '{code}' มีอยู่ในระบบแล้ว", parent=dialog)
+                return
+
+            if existing:
+                item = existing
+            else:
+                battery_type = combo_type.get()
+                if battery_type == BATTERY_TYPES[0]:
+                    battery_type = "-"
+                try:
+                    inv_service.add_item(
+                        brand, code, f"{BATTERY} {code}", entry_cap.get().strip() or "-",
+                        battery_type, "ลูก", 9999, 0, category=BATTERY,
+                    )
+                except Exception as ex:
+                    messagebox.showerror("ผิดพลาด", f"บันทึกรุ่นใหม่ไม่สำเร็จ: {ex}", parent=dialog)
+                    return
+                item = inv_service.get_item_by_code(code)
+
+            dialog.destroy()
+            self.refresh_inventory_cache()
+            if hasattr(self, "stock_tree"):
+                self.refresh_stock_table()
+
+            if add_to_bill:
+                self.add_item_to_cart(item, clear_search=True, qty=qty, remark=remark)
+                if existing:
+                    self.show_quick_toast(f"ℹ️ มีรุ่น {code} อยู่แล้ว เพิ่มรุ่นเดิมลงใบเบิก x {qty} ลูก", color="#0e7490")
+            elif existing:
+                messagebox.showinfo("แจ้งเตือน", f"มีรุ่น '{code}' อยู่ในระบบแล้ว ไม่ได้บันทึกซ้ำ")
+            else:
+                self.show_quick_toast(f"✅ บันทึกรุ่นใหม่ {code} เรียบร้อย")
+                if for_requisition and hasattr(self, "entry_battery_search"):
+                    self.entry_battery_search.delete(0, "end")
+                    self.refresh_live_matches()
+
+        def switch_to_part():
+            text = " ".join(x for x in (combo_brand.get().strip(), entry_model.get().strip()) if x)
+            qty_text = entry_qty.get().strip() if entry_qty else ""
+            remark = entry_rem.get().strip() if entry_rem else ""
+            dialog.destroy()
+            self.open_custom_item_dialog(
+                prefill_name=text,
+                prefill_qty=int(qty_text) if qty_text.isdigit() else None,
+                prefill_remark=remark,
+            )
+
+        btn_box = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_box.pack(fill="x", side="bottom", padx=20, pady=(8, 16))
+        ctk.CTkButton(btn_box, text="ยกเลิก", fg_color="#64748b", hover_color="#475569", width=90,
+                      command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_box, text="💾 บันทึกรุ่นใหม่", fg_color="#15803d", hover_color="#166534", width=140,
+                      font=ctk.CTkFont(weight="bold"), command=save).pack(side="right")
+        if for_requisition:
+            ctk.CTkButton(btn_box, text="ไม่ใช่แบต → เพิ่มเป็นอะไหล่/สินค้าอื่น", fg_color="transparent",
+                          border_width=1, border_color="#ea580c", text_color=("#c2410c", "#fdba74"),
+                          hover_color=("#ffedd5", "#431407"), command=switch_to_part).pack(side="left")
+
+        dialog.bind("<Return>", lambda e: save())
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.after(100, lambda: (entry_model if prefill_brand or not prefill_model else combo_brand).focus())
+
+        self.new_battery_dialog = dialog
+        dialog.form_widgets = {
+            "brand": combo_brand, "model": entry_model, "capacity": entry_cap, "type": combo_type,
+            "add_to_bill": var_add_to_bill, "qty": entry_qty, "remark": entry_rem,
+            "save": save, "switch_to_part": switch_to_part, "preview": lbl_preview,
+        }
+        return dialog
+
+    def open_custom_item_dialog(self, prefill_name="", prefill_qty=None, prefill_remark=""):
+        """เพิ่มอะไหล่ / สินค้าอื่นที่ไม่ใช่แบตเตอรี่ลงใบเบิก (ไม่บันทึกเข้าข้อมูลรุ่น)"""
+        prefill_name, prefill_qty, prefill_remark = self._prefill_from_search(prefill_name, prefill_qty, prefill_remark)
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("📦 เพิ่มอะไหล่ / สินค้าทั่วไป (ไม่ใช่แบตเตอรี่)")
-        dialog.geometry("520x420")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 520) // 2
-        y = self.winfo_y() + (self.winfo_height() - 420) // 2
-        dialog.geometry(f"+{x}+{y}")
+        self._center_dialog(dialog, 520, 440)
 
         ctk.CTkLabel(
-            dialog, 
-            text="📦 เพิ่มสินค้าทั่วไป / อะไหล่อื่นๆ ลงในใบเบิก", 
+            dialog,
+            text="📦 เพิ่มอะไหล่ / สินค้าอื่นๆ ลงในใบเบิก",
             font=ctk.CTkFont(size=16, weight="bold")
         ).pack(padx=20, pady=(16, 4), anchor="w")
 
         ctk.CTkLabel(
-            dialog, 
-            text="ใช้สำหรับเพิ่มสินค้า เช่น ไดชาร์จ, ไดสตาร์ท, ลูกปืน, น้ำกลั่น, ขั้วแบต ฯลฯ", 
-            font=ctk.CTkFont(size=12), 
+            dialog,
+            text="เช่น ไดชาร์จ, ไดสตาร์ท, ขั้วแบต, น้ำกลั่น • ถ้าเป็นแบตเตอรี่ให้ใช้ปุ่ม \"➕ เพิ่มแบตรุ่นใหม่\"",
+            font=ctk.CTkFont(size=12),
             text_color="gray"
         ).pack(padx=20, pady=(0, 12), anchor="w")
 
@@ -972,16 +1341,16 @@ class BatteryRequisitionApp(ctk.CTk):
         form.pack(fill="x", padx=20, pady=4)
         form.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(form, text="ชื่อสินค้า/อะไหล่:*", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=6)
+        ctk.CTkLabel(form, text="หมวดสินค้า:*", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=6)
+        combo_category = ctk.CTkComboBox(form, values=OTHER_CATEGORIES, state="readonly")
+        combo_category.set(OTHER_CATEGORIES[0])
+        combo_category.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=6)
+
+        ctk.CTkLabel(form, text="ชื่อสินค้า/อะไหล่:*", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, sticky="w", pady=6)
         entry_custom_name = ctk.CTkEntry(form, placeholder_text="เช่น ไดชาร์จ โตโยต้า วีโก้ 80A, ลูกปืนล้อหน้า NSK...")
         if prefill_name:
             entry_custom_name.insert(0, prefill_name)
-        entry_custom_name.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=6)
-
-        ctk.CTkLabel(form, text="หมวด/ยี่ห้อ:").grid(row=1, column=0, sticky="w", pady=6)
-        combo_custom_brand = ctk.CTkComboBox(form, values=["อะไหล่", "ทั่วไป", "อุปกรณ์เสริม", "น้ำกลั่น/เคมี", "เครื่องมือ"])
-        combo_custom_brand.set("อะไหล่")
-        combo_custom_brand.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=6)
+        entry_custom_name.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="จำนวน:*", font=ctk.CTkFont(weight="bold")).grid(row=2, column=0, sticky="w", pady=6)
         entry_custom_qty = ctk.CTkEntry(form, width=80, justify="center", font=ctk.CTkFont(size=14, weight="bold"))
@@ -989,12 +1358,12 @@ class BatteryRequisitionApp(ctk.CTk):
         entry_custom_qty.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="หน่วยนับ:*", font=ctk.CTkFont(weight="bold")).grid(row=3, column=0, sticky="w", pady=6)
-        combo_custom_unit = ctk.CTkComboBox(form, values=["ตัว", "ชิ้น", "ตลับ", "ชุด", "ลูก", "กล่อง", "ขวด", "แกลลอน", "ลัง"])
+        combo_custom_unit = ctk.CTkComboBox(form, values=[u for u in UNIT_CHOICES if u != "ลูก"])
         combo_custom_unit.set("ตัว")
         combo_custom_unit.grid(row=3, column=1, sticky="w", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="หมายเหตุเสริม:").grid(row=4, column=0, sticky="w", pady=6)
-        entry_custom_rem = ctk.CTkEntry(form, placeholder_text="เช่น ของแท้ศูนย์, เบิกด่วน, เทิร์นลูกเก่า...")
+        entry_custom_rem = ctk.CTkEntry(form, placeholder_text="เช่น ของแท้ศูนย์, เบิกด่วน...")
         if prefill_remark:
             entry_custom_rem.insert(0, prefill_remark)
         entry_custom_rem.grid(row=4, column=1, sticky="ew", padx=(10, 0), pady=6)
@@ -1013,19 +1382,20 @@ class BatteryRequisitionApp(ctk.CTk):
                 return
             qty = int(qty_str)
 
-            brand = combo_custom_brand.get().strip() or "อะไหล่"
+            category = combo_category.get().strip() or OTHER_CATEGORIES[0]
             unit = combo_custom_unit.get().strip() or "ตัว"
             rem = entry_custom_rem.get().strip()
 
             self.cart_items.append({
                 "item_id": None,
-                "brand": brand,
+                "brand": category,
                 "item_code": name,
                 "item_name": name,
                 "capacity": "-",
                 "unit": unit,
                 "quantity": qty,
-                "remark": rem
+                "remark": rem,
+                "category": category,
             })
 
             self.render_cart_items()
@@ -1034,7 +1404,7 @@ class BatteryRequisitionApp(ctk.CTk):
             except Exception:
                 pass
 
-            self.show_quick_toast(f"📦 เพิ่ม [{brand}] {name} x {qty} {unit} เข้าใบเบิกแล้ว!")
+            self.show_quick_toast(f"📦 เพิ่ม [{category}] {name} x {qty} {unit} เข้าใบเบิกแล้ว!")
             if hasattr(self, "entry_battery_search"):
                 self.entry_battery_search.delete(0, "end")
                 self.refresh_live_matches()
@@ -1042,22 +1412,27 @@ class BatteryRequisitionApp(ctk.CTk):
             dialog.destroy()
 
         btn_box = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_box.pack(fill="x", padx=20, pady=(20, 16))
+        btn_box.pack(fill="x", padx=20, pady=(16, 16))
 
-        btn_cancel = ctk.CTkButton(btn_box, text="ยกเลิก", fg_color="#64748b", hover_color="#475569", width=90, command=dialog.destroy)
-        btn_cancel.pack(side="right", padx=(8, 0))
-
-        btn_submit = ctk.CTkButton(
-            btn_box, text="➕ เพิ่มลงในใบเบิก", 
-            fg_color="#ea580c", hover_color="#c2410c", 
-            width=140, font=ctk.CTkFont(weight="bold"), 
+        ctk.CTkButton(btn_box, text="ยกเลิก", fg_color="#64748b", hover_color="#475569", width=90,
+                      command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            btn_box, text="➕ เพิ่มลงในใบเบิก",
+            fg_color="#ea580c", hover_color="#c2410c",
+            width=140, font=ctk.CTkFont(weight="bold"),
             command=add_and_close
-        )
-        btn_submit.pack(side="right")
+        ).pack(side="right")
 
         dialog.bind("<Return>", lambda e: add_and_close())
         dialog.bind("<Escape>", lambda e: dialog.destroy())
         entry_custom_name.focus()
+
+        self.custom_item_dialog = dialog
+        dialog.form_widgets = {
+            "category": combo_category, "name": entry_custom_name, "qty": entry_custom_qty,
+            "unit": combo_custom_unit, "remark": entry_custom_rem, "submit": add_and_close,
+        }
+        return dialog
 
     def open_edit_cart_item_dialog(self, index):
         if not (0 <= index < len(self.cart_items)):
@@ -1093,7 +1468,7 @@ class BatteryRequisitionApp(ctk.CTk):
 
         ctk.CTkLabel(form, text="ความจุ (Capacity):").grid(row=2, column=0, sticky="w", pady=6)
         entry_cap = ctk.CTkEntry(form)
-        entry_cap.insert(0, item.get("capacity", ""))
+        entry_cap.insert(0, item.get("capacity") or "")
         entry_cap.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="จำนวน:").grid(row=3, column=0, sticky="w", pady=6)
@@ -1102,13 +1477,13 @@ class BatteryRequisitionApp(ctk.CTk):
         entry_qty.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="หน่วยนับ:").grid(row=4, column=0, sticky="w", pady=6)
-        combo_unit = ctk.CTkComboBox(form, values=["ตัว", "ชิ้น", "ตลับ", "ชุด", "ลูก", "กล่อง", "ขวด", "แกลลอน", "ลัง"])
+        combo_unit = ctk.CTkComboBox(form, values=UNIT_CHOICES)
         combo_unit.set(item.get("unit", "ลูก"))
         combo_unit.grid(row=4, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         ctk.CTkLabel(form, text="หมายเหตุเสริม:").grid(row=5, column=0, sticky="w", pady=6)
         entry_remark = ctk.CTkEntry(form, placeholder_text="เช่น เทิร์นลูกเก่า, ขั้ว L, ของแถม...")
-        entry_remark.insert(0, item.get("remark", ""))
+        entry_remark.insert(0, item.get("remark") or "")
         entry_remark.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         def save_changes():
@@ -1178,8 +1553,11 @@ class BatteryRequisitionApp(ctk.CTk):
         self.update_cart_summary()
 
     def update_cart_summary(self):
-        total_units = sum(item["quantity"] for item in self.cart_items)
-        self.lbl_cart_summary.configure(text=f"รวม: {len(self.cart_items)} รายการ ({total_units} ลูก)")
+        if not self.cart_items:
+            self.lbl_cart_summary.configure(text="ยังไม่มีรายการ")
+            return
+        breakdown = format_breakdown(count_breakdown(self.cart_items))
+        self.lbl_cart_summary.configure(text=f"ตรวจนับ ({len(self.cart_items)} รายการ): {breakdown}")
 
     def remove_cart_item(self, index):
         if 0 <= index < len(self.cart_items):
@@ -1213,13 +1591,21 @@ class BatteryRequisitionApp(ctk.CTk):
         route = self.combo_route.get().strip()
         ref_bill = self.entry_ref_bill.get().strip()
         purpose = self.entry_purpose.get().strip()
-        req_date = self.entry_req_date.get().strip()
         req_no = self.entry_req_no.get().strip()
 
         if not customer:
             messagebox.showwarning("แจ้งเตือน", "กรุณาระบุชื่อลูกค้า / ร้านค้าปลายทาง")
             self.entry_customer.focus()
             return
+
+        try:
+            req_date = normalize_req_date(self.entry_req_date.get())
+        except ValueError as e:
+            messagebox.showwarning("วันที่ไม่ถูกต้อง", f"{e}\nรองรับ เช่น 3/9/2026, 03/09/2026 หรือปี พ.ศ. 3/9/2569")
+            self.entry_req_date.focus()
+            return
+        self.entry_req_date.delete(0, "end")
+        self.entry_req_date.insert(0, req_date)
 
         if not self.cart_items:
             messagebox.showwarning("แจ้งเตือน", "กรุณาเพิ่มรายการแบตเตอรี่อย่างน้อย 1 รายการก่อนบันทึก")
@@ -1233,9 +1619,9 @@ class BatteryRequisitionApp(ctk.CTk):
             )
             return
 
+        # ขั้นที่ 1: บันทึกลงฐานข้อมูล
         try:
             if self.editing_req_id:
-                # แก้ไขใบเบิกเดิม
                 req_id, final_req_no = inv_service.update_requisition(
                     req_id=self.editing_req_id,
                     driver_name=driver,
@@ -1249,7 +1635,6 @@ class BatteryRequisitionApp(ctk.CTk):
                 )
                 success_msg = f"แก้ไขใบเบิก {final_req_no} เรียบร้อยแล้ว!"
             else:
-                # สร้างใบเบิกใหม่
                 req_id, final_req_no = inv_service.create_requisition(
                     driver_name=driver,
                     vehicle_plate=vehicle,
@@ -1262,31 +1647,40 @@ class BatteryRequisitionApp(ctk.CTk):
                     req_date=req_date
                 )
                 success_msg = f"สร้างใบเบิกเลขที่ {final_req_no} เรียบร้อยแล้ว!"
+        except Exception as e:
+            messagebox.showerror("บันทึกไม่สำเร็จ", str(e))
+            return
 
-            settings = inv_service.get_settings()
-            req_data = {
-                "req_no": final_req_no,
-                "req_date": req_date,
-                "driver_name": driver,
-                "vehicle_plate": vehicle,
-                "customer_name": customer,
-                "route_zone": route,
-                "ref_bill_no": ref_bill,
-                "purpose": purpose
-            }
+        # ขั้นที่ 2: สร้าง PDF (บันทึกสำเร็จแล้ว ถ้า PDF พลาดก็ยังล้างฟอร์ม ป้องกันกดบันทึกซ้ำ)
+        req_data = {
+            "req_no": final_req_no,
+            "req_date": req_date,
+            "driver_name": driver,
+            "vehicle_plate": vehicle,
+            "customer_name": customer,
+            "route_zone": route,
+            "ref_bill_no": ref_bill,
+            "purpose": purpose
+        }
+        items_snapshot = [dict(it) for it in self.cart_items]
+        self.exit_edit_mode()
 
+        try:
             pdf_path = pdf_gen.generate_requisition_pdf(
                 req_data=req_data,
-                items_data=self.cart_items,
-                settings=settings
+                items_data=items_snapshot,
+                settings=inv_service.get_settings()
             )
-
-            messagebox.showinfo("สำเร็จ", f"{success_msg}\nไฟล์ PDF: {pdf_path}")
-            pdf_gen.open_pdf_file(pdf_path)
-            self.exit_edit_mode()
-
         except Exception as e:
-            messagebox.showerror("เกิดข้อผิดพลาด", str(e))
+            messagebox.showwarning(
+                "บันทึกแล้ว แต่สร้าง PDF ไม่ได้",
+                f"{success_msg}\n\nแต่สร้างไฟล์ PDF ไม่สำเร็จ (อาจเปิดไฟล์ PDF เดิมค้างไว้อยู่)\n"
+                f"กรุณาปิดไฟล์ PDF แล้วไปกด 'เปิดดู / พิมพ์ซ้ำ' ในหน้าประวัติ\n\nรายละเอียด: {e}"
+            )
+            return
+
+        messagebox.showinfo("สำเร็จ", f"{success_msg}\nไฟล์ PDF: {pdf_path}")
+        pdf_gen.open_pdf_file(pdf_path)
 
     # ==========================================
     # 2. VIEW: ข้อมูลรุ่นแบตเตอรี่ (Battery Models Catalog)
@@ -1308,7 +1702,7 @@ class BatteryRequisitionApp(ctk.CTk):
         btn_add_product = ctk.CTkButton(
             top_bar, text="➕ เพิ่มรุ่นแบตเตอรี่ใหม่",
             fg_color="#15803d", hover_color="#166534",
-            command=self.open_add_product_dialog
+            command=lambda: self.open_new_battery_dialog(for_requisition=False)
         )
         btn_add_product.grid(row=0, column=2, padx=12, pady=10)
 
@@ -1371,50 +1765,9 @@ class BatteryRequisitionApp(ctk.CTk):
                 it["brand"],
                 it["item_code"],
                 it["item_name"],
-                it.get("capacity", "-"),
-                it.get("battery_type", "-")
+                it.get("capacity") or "-",
+                it.get("battery_type") or "-"
             ))
-
-    def open_add_product_dialog(self):
-        dlg = ctk.CTkToplevel(self)
-        dlg.title("เพิ่มรุ่นแบตเตอรี่ใหม่")
-        dlg.geometry("460x360")
-        dlg.grab_set()
-
-        ctk.CTkLabel(dlg, text="ยี่ห้อแบตเตอรี่ (เช่น GS, FB, PUMA, YUASA):*").pack(anchor="w", padx=24, pady=(14, 2))
-        e_brand = ctk.CTkEntry(dlg)
-        e_brand.pack(fill="x", padx=24)
-
-        ctk.CTkLabel(dlg, text="รหัสรุ่น (เช่น MFX-60L, DIN75, N100):*").pack(anchor="w", padx=24, pady=(6, 2))
-        e_code = ctk.CTkEntry(dlg)
-        e_code.pack(fill="x", padx=24)
-
-        ctk.CTkLabel(dlg, text="ชื่อและรายละเอียด (เช่น ขั้ว L แบตกึ่งแห้ง):*").pack(anchor="w", padx=24, pady=(6, 2))
-        e_name = ctk.CTkEntry(dlg)
-        e_name.pack(fill="x", padx=24)
-
-        ctk.CTkLabel(dlg, text="ขนาดความจุ (เช่น 45 Ah, 75 Ah):").pack(anchor="w", padx=24, pady=(6, 2))
-        e_cap = ctk.CTkEntry(dlg)
-        e_cap.insert(0, "45 Ah")
-        e_cap.pack(fill="x", padx=24)
-
-        def save():
-            brand = e_brand.get().strip().upper()
-            code = e_code.get().strip()
-            name = e_name.get().strip()
-            cap = e_cap.get().strip()
-            if not brand or not code or not name:
-                messagebox.showwarning("แจ้งเตือน", "กรุณากรอกยี่ห้อ รหัสรุ่น และชื่อให้ครบ", parent=dlg)
-                return
-            try:
-                inv_service.add_item(brand, code, name, cap, "กึ่งแห้ง (MF)", "ลูก", 9999)
-                self.refresh_stock_table()
-                self.load_initial_data()
-                dlg.destroy()
-            except Exception as ex:
-                messagebox.showerror("ผิดพลาด", f"รหัสรุ่นนี้อาจซ้ำ หรือเกิดข้อผิดพลาด: {ex}", parent=dlg)
-
-        ctk.CTkButton(dlg, text="บันทึกแบตเตอรี่", command=save, fg_color="#15803d", height=36).pack(fill="x", padx=24, pady=16)
 
     def open_edit_product_dialog(self):
         sel = self.stock_tree.selection()
@@ -1450,20 +1803,34 @@ class BatteryRequisitionApp(ctk.CTk):
         e_cap.pack(fill="x", padx=24)
 
         def save():
-            inv_service.update_item(
-                item_id=item_id,
-                brand=e_brand.get().strip().upper(),
-                item_code=e_code.get().strip(),
-                item_name=e_name.get().strip(),
-                capacity=e_cap.get().strip(),
-                battery_type=values[4],
-                unit="ลูก",
-                stock_qty=9999,
-                min_qty=0
-            )
-            self.refresh_stock_table()
-            self.load_initial_data()
+            brand = e_brand.get().strip().upper()
+            code = e_code.get().strip()
+            name = e_name.get().strip()
+            if not brand or not code or not name:
+                messagebox.showwarning("แจ้งเตือน", "กรุณากรอกยี่ห้อ รหัสรุ่น และชื่อให้ครบ", parent=dlg)
+                return
+            duplicate = inv_service.get_item_by_code(code)
+            if duplicate and duplicate["id"] != item_id:
+                messagebox.showwarning("แจ้งเตือน", f"รหัสรุ่น '{code}' ซ้ำกับรุ่นอื่นในระบบ", parent=dlg)
+                return
+            try:
+                inv_service.update_item(
+                    item_id=item_id,
+                    brand=brand,
+                    item_code=code,
+                    item_name=name,
+                    capacity=e_cap.get().strip(),
+                    battery_type=str(values[4]),
+                    unit="ลูก",
+                    stock_qty=9999,
+                    min_qty=0
+                )
+            except Exception as ex:
+                messagebox.showerror("ผิดพลาด", f"บันทึกการแก้ไขไม่สำเร็จ: {ex}", parent=dlg)
+                return
             dlg.destroy()
+            self.refresh_stock_table()
+            self.refresh_inventory_cache()
 
         ctk.CTkButton(dlg, text="บันทึกการแก้ไข", command=save, fg_color="#d97706", text_color="white", height=36).pack(fill="x", padx=24, pady=16)
 
@@ -1477,7 +1844,7 @@ class BatteryRequisitionApp(ctk.CTk):
         if confirm:
             inv_service.delete_item(int(sel[0]))
             self.refresh_stock_table()
-            self.load_initial_data()
+            self.refresh_inventory_cache()
 
     # ==========================================
     # 3. VIEW: ประวัติและพิมพ์ซ้ำ (History View)
@@ -1597,6 +1964,9 @@ class BatteryRequisitionApp(ctk.CTk):
         )
         btn_reset.pack(side="left", padx=3)
 
+        self.lbl_hist_filter_error = ctk.CTkLabel(filter_box, text="", text_color="#dc2626", font=ctk.CTkFont(size=12, weight="bold"))
+        self.lbl_hist_filter_error.pack(anchor="w", padx=12, pady=(0, 4))
+
         # ----------------------------------------------------
         # ส่วนที่ 3: ตารางแสดงประวัติใบเบิก
         # ----------------------------------------------------
@@ -1617,7 +1987,7 @@ class BatteryRequisitionApp(ctk.CTk):
         self.hist_tree.heading("driver", text="คนขับ/ผู้เบิก")
         self.hist_tree.heading("customer", text="ร้านค้า/ลูกค้า")
         self.hist_tree.heading("bill", text="บิลอ้างอิง")
-        self.hist_tree.heading("total_qty", text="จำนวนลูก")
+        self.hist_tree.heading("total_qty", text="แบต (ลูก) / อื่นๆ")
         self.hist_tree.heading("status", text="สถานะ")
 
         self.hist_tree.column("req_no", width=130, anchor="center")
@@ -1626,7 +1996,7 @@ class BatteryRequisitionApp(ctk.CTk):
         self.hist_tree.column("driver", width=140, anchor="w")
         self.hist_tree.column("customer", width=180, anchor="w")
         self.hist_tree.column("bill", width=100, anchor="center")
-        self.hist_tree.column("total_qty", width=90, anchor="center")
+        self.hist_tree.column("total_qty", width=130, anchor="center")
         self.hist_tree.column("status", width=90, anchor="center")
 
         scrollbar = ttk.Scrollbar(table_container, orient="vertical", command=self.hist_tree.yview)
@@ -1714,7 +2084,7 @@ class BatteryRequisitionApp(ctk.CTk):
             self.entry_hist_date_to.delete(0, "end")
             self.entry_hist_date_to.insert(0, yest_str)
         elif chip_name == "this_week":
-            week_str = (now - timedelta(days=7)).strftime("%d/%m/%Y")
+            week_str = (now - timedelta(days=6)).strftime("%d/%m/%Y")  # รวมวันนี้ = 7 วันพอดี
             self.entry_hist_date_from.delete(0, "end")
             self.entry_hist_date_from.insert(0, week_str)
             self.entry_hist_date_to.delete(0, "end")
@@ -1755,27 +2125,41 @@ class BatteryRequisitionApp(ctk.CTk):
             if curr_cust in cust_list:
                 self.combo_hist_customer.set(curr_cust)
 
-        self.current_filtered_reqs = inv_service.get_requisitions_advanced(
-            start_date=date_from,
-            end_date=date_to,
-            customer=customer,
-            keyword=search,
-            limit=200
-        )
+        try:
+            # ดึงทุกใบที่ตรงเงื่อนไข: ใช้ทั้งยอดสรุปและการส่งออก Excel (ตารางแสดงเฉพาะใบล่าสุด)
+            self.current_filtered_reqs = inv_service.get_requisitions_advanced(
+                start_date=date_from,
+                end_date=date_to,
+                customer=customer,
+                keyword=search,
+                limit=None
+            )
+            if hasattr(self, "lbl_hist_filter_error"):
+                self.lbl_hist_filter_error.configure(text="")
+        except ValueError as e:
+            self.current_filtered_reqs = []
+            if hasattr(self, "lbl_hist_filter_error"):
+                self.lbl_hist_filter_error.configure(text=f"⚠️ {e}")
 
         completed_units = 0
+        completed_others = 0
         completed_bills = 0
         cancelled_bills = 0
 
-        for r in self.current_filtered_reqs:
+        for idx, r in enumerate(self.current_filtered_reqs):
             status_str = "✅ จ่ายของแล้ว" if r["status"] == "COMPLETED" else "❌ ยกเลิกแล้ว"
-            units = int(r.get("total_units") or 0)
+            units = int(r.get("battery_units") or 0)
+            others = int(r.get("other_lines") or 0)
             if r["status"] == "COMPLETED":
                 completed_units += units
+                completed_others += others
                 completed_bills += 1
             else:
                 cancelled_bills += 1
 
+            if idx >= HISTORY_DISPLAY_LIMIT:
+                continue
+            qty_text = f"{units} ลูก" + (f" + อื่นๆ {others}" if others else "")
             self.hist_tree.insert("", "end", iid=str(r["id"]), values=(
                 r["req_no"],
                 r["req_date"],
@@ -1783,7 +2167,7 @@ class BatteryRequisitionApp(ctk.CTk):
                 r.get("driver_name", "-"),
                 r.get("customer_name", "-"),
                 r.get("ref_bill_no", "-"),
-                f"{units} ลูก",
+                qty_text,
                 status_str
             ))
 
@@ -1791,14 +2175,17 @@ class BatteryRequisitionApp(ctk.CTk):
         if hasattr(self, "lbl_stat_today"):
             today_stats = inv_service.get_today_requisitions_stats()
             self.lbl_stat_today.configure(
-                text=f"{today_stats['completed_bills']} บิล ({today_stats['completed_units']} ลูก)" + 
+                text=f"{today_stats['completed_bills']} บิล ({format_totals(today_stats['completed_units'], today_stats['completed_other_lines'])})" + 
                      (f" | ยกเลิก {today_stats['cancelled_bills']} ใบ" if today_stats['cancelled_bills'] > 0 else "")
             )
 
         if hasattr(self, "lbl_stat_filtered"):
+            shown_note = ""
+            if len(self.current_filtered_reqs) > HISTORY_DISPLAY_LIMIT:
+                shown_note = f" • ตารางแสดง {HISTORY_DISPLAY_LIMIT} ใบล่าสุด"
             self.lbl_stat_filtered.configure(
-                text=f"{completed_bills} บิล ({completed_units} ลูก)" + 
-                     (f" | ยกเลิก {cancelled_bills} ใบ" if cancelled_bills > 0 else "")
+                text=f"{completed_bills} บิล ({format_totals(completed_units, completed_others)})" + 
+                     (f" | ยกเลิก {cancelled_bills} ใบ" if cancelled_bills > 0 else "") + shown_note
             )
 
     def export_history_excel_action(self):
@@ -1828,7 +2215,8 @@ class BatteryRequisitionApp(ctk.CTk):
         try:
             excel_path = report_exporter.export_requisitions_to_excel(
                 self.current_filtered_reqs,
-                filter_desc=filter_desc
+                filter_desc=filter_desc,
+                company_name=inv_service.get_settings().get("company_name") or "บริษัท คลังแบตเตอรี่และบริการ จำกัด",
             )
             report_exporter.open_exported_excel(excel_path)
             messagebox.showinfo("ส่งออกสำเร็จ", f"ส่งออกรายงาน Excel เรียบร้อยแล้ว:\n{os.path.basename(excel_path)}")
@@ -1846,8 +2234,15 @@ class BatteryRequisitionApp(ctk.CTk):
             messagebox.showerror("ผิดพลาด", "ไม่พบข้อมูลใบเบิกนี้")
             return
 
-        settings = inv_service.get_settings()
-        pdf_path = pdf_gen.generate_requisition_pdf(req, items, settings)
+        try:
+            pdf_path = pdf_gen.generate_requisition_pdf(req, items, inv_service.get_settings())
+        except Exception as e:
+            messagebox.showerror(
+                "สร้าง PDF ไม่สำเร็จ",
+                f"สร้างไฟล์ PDF ของใบเบิก {req['req_no']} ไม่สำเร็จ\n"
+                f"ถ้าเปิดไฟล์ PDF นี้ค้างไว้อยู่ กรุณาปิดก่อนแล้วลองใหม่\n\nรายละเอียด: {e}"
+            )
+            return
         pdf_gen.open_pdf_file(pdf_path)
 
     def load_requisition_for_edit(self):
@@ -1950,8 +2345,8 @@ class BatteryRequisitionApp(ctk.CTk):
         )
         if confirm:
             try:
-                inv_service.clear_cancelled_requisitions()
-                messagebox.showinfo("สำเร็จ", "ล้างรายการที่ยกเลิกทั้งหมดเรียบร้อยแล้ว")
+                deleted = inv_service.clear_cancelled_requisitions()
+                messagebox.showinfo("สำเร็จ", f"ล้างใบเบิกที่ยกเลิกแล้ว {deleted} ใบ เรียบร้อยแล้ว")
                 self.refresh_history_table()
             except Exception as e:
                 messagebox.showerror("ผิดพลาด", str(e))
@@ -2006,7 +2401,7 @@ class BatteryRequisitionApp(ctk.CTk):
         ctk.CTkLabel(folder_card, text="📁 โฟลเดอร์เก็บเอกสาร PDF", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=20, pady=(16, 6)
         )
-        pdf_dir_path = os.path.abspath("output_pdfs")
+        pdf_dir_path = app_paths.pdf_dir()
         ctk.CTkLabel(folder_card, text=f"ที่อยู่โฟลเดอร์: {pdf_dir_path}", text_color="gray").grid(
             row=1, column=0, sticky="w", padx=20, pady=(0, 10)
         )

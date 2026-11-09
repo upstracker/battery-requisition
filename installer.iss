@@ -21,7 +21,7 @@ AllowNoIcons=yes
 OutputDir=dist_installer
 OutputBaseFilename=Setup_BatteryRequisition_v1.0.0
 SetupIconFile=assets\car_battery.ico
-UninstallDisplayIcon={app}\assets\car_battery.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 ; บีบอัดไฟล์ตัวติดตั้งสูงสุดแบบ LZMA2
 Compression=lzma2/ultra64
@@ -48,12 +48,13 @@ Name: "desktopicon"; Description: "สร้างไอคอนบนหน้
 ; คัดลอกไฟล์โปรแกรมทั้งหมดจากโฟลเดอร์ dist\BatteryRequisition
 Source: "dist\BatteryRequisition\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; ป้องกันไม่ให้ตัวติดตั้งเขียนทับไฟล์ฐานข้อมูลของผู้ใช้ในโฟลเดอร์ data
-Source: "data\*"; DestDir: "{app}\data"; Flags: onlyifdoesntexist recursesubdirs createallsubdirs
+; ฐานข้อมูลที่ใช้งานจริงอยู่ที่ %LOCALAPPDATA%\BatteryRequisition\data (โปรแกรมสร้างเองตอนเปิดครั้งแรก)
+; ถ้ามีโฟลเดอร์ data ตอน build จะถูกคัดลอกไปเป็นข้อมูลตั้งต้น และโปรแกรมจะย้ายไป %LOCALAPPDATA% ให้ครั้งแรก
+Source: "data\*"; DestDir: "{app}\data"; Flags: onlyifdoesntexist recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\ระบบออกใบเบิกแบตเตอรี่\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\car_battery.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\car_battery.ico"; Tasks: desktopicon
+Name: "{autoprograms}\ระบบออกใบเบิกแบตเตอรี่\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 Name: "{autoprograms}\ระบบออกใบเบิกแบตเตอรี่\ถอนการติดตั้งโปรแกรม (Uninstall)"; Filename: "{uninstallexe}"
 
 [Run]

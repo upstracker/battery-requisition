@@ -102,3 +102,33 @@ def find_inventory_matches(items, query):
         str(pair[1].get("item_code", "")).upper(),
     ))
     return scored
+
+
+def is_exact_model_match(item, query):
+    """
+    รหัสตรงทุกตัวอักษร (ไม่สนช่องว่าง/ขีด/ตัวพิมพ์) โดยนับทั้งแบบมียี่ห้อและไม่มียี่ห้อ
+    เช่น "N100" และ "FB N100" ตรงกับรหัส "FB N100"
+    """
+    compact_query = _compact_search_text(query)
+    if not compact_query:
+        return False
+    code, brand = prepare_inventory_item(item)["_compact_fields"][:2]
+    if code == compact_query:
+        return True
+    if brand and code.startswith(brand) and code[len(brand):] == compact_query:
+        return True
+    return bool(brand) and not code.startswith(brand) and brand + code == compact_query
+
+
+def pick_direct_match(scored, query):
+    """
+    คืนรายการที่เพิ่มลงบิลได้ทันทีเมื่อกด Enter หรือ None ถ้าต้องให้ผู้ใช้เลือกเอง
+    - เจอเพียงรุ่นเดียว หรือรหัสตรงทุกตัวอักษรเพียงรุ่นเดียว -> เพิ่มทันที
+    - เจอหลายรุ่นแบบใกล้เคียง หรือรหัสเดียวกันมีหลายยี่ห้อ -> None (เปิดหน้าต่างให้เลือก)
+    """
+    if len(scored) == 1:
+        return scored[0][1]
+    exact = [item for _, item in scored if is_exact_model_match(item, query)]
+    if len(exact) == 1:
+        return exact[0]
+    return None
